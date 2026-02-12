@@ -1,10 +1,14 @@
 use lazy_static::lazy_static;
 use regex::Regex;
+use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
+use std::env;
 use std::fmt;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::{BufRead, BufReader, Write};
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize)]
 pub enum LogLevel {
     INFO,
     DEBUG,
@@ -32,7 +36,7 @@ impl From<&str> for LogLevel {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
     pub timestamp: String,
     pub verbosity_level: LogLevel,
@@ -133,16 +137,42 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     })
 }
 
-fn main() {
-    let log_line = "2015-12-04 13:48:28,241 INFO org.apache.hadoop.hdfs.server.datanode.DataNode: Successfully sent block report 0x7aaf8f37153be,  containing 1 storage report(s), of which we sent 1. The reports had 0 total blocks and used 1 RPC(s). This took 0 msec to generate and 2 msecs for RPC and NN processing. Got back one command: FinalizeCommand/5.";
-
-    println!("Log line\n{}", log_line.to_string());
-    if let Some(entry) = parse_line(log_line) {
-        println!("Parsed Entry: \n{:?}\n", entry);
-        println!("Template: \n{}\n", entry.template_str);
-    } else {
-        println!("Failed to parse line: {}", log_line);
+fn main() -> std::io::Result<()> {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        eprintln!("Usage: {} <input_log_file> <output_file>", args[0]);
+        std::process::exit(1);
     }
+
+    let input_path = &args[1];
+    let output_path = &args[2];
+
+    println!("Reading logs from: {}", input_path);
+    println!("Writing output to: {}", output_path);
+
+    let input_file = File::open(input_path)?;
+    let reader = BufReader::new(input_file);
+    let mut output_file = File::create(output_path)?;
+
+    let mut count = 0;
+    for line_result in reader.lines() {
+        let line = line_result?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(entry) = parse_line(&line) {
+            // Serialize to JSON and write to output file
+            let json_entry = serde_json::to_string(&entry)?;
+            writeln!(output_file, "{}", json_entry)?;
+            count += 1;
+        } else {
+            eprintln!("Skipping unparsable line: {}", line);
+        }
+    }
+
+    println!("Successfully processed {} log lines.", count);
+    Ok(())
 }
 
 #[cfg(test)]
