@@ -48,8 +48,8 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     // Assuming format like: "2024-05-22 10:00:00 INFO Body..."
     // Adjust regex based on specific timestamp format requirements
     lazy_static! {
-        static ref HEADER_RE: Regex =
-            Regex::new(r"^(?P<ts>[\d\-]+\s[\d:]+)\s+(?P<lvl>\w+)\s+").unwrap();
+        // Updated regex to include comma in timestamp characters [\d:,]+
+        static ref HEADER_RE: Regex = Regex::new(r"^(?P<ts>[\d\-]+\s[\d:,]+)\s+(?P<lvl>\w+)\s+").unwrap();
         static ref IP_RE: Regex = Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$").unwrap();
         static ref DIGIT_RE: Regex = Regex::new(r"\d").unwrap();
     }
@@ -134,20 +134,15 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
 }
 
 fn main() {
-    let log_line = "2024-05-22 10:00:00 INFO User 'admin' failed login from 192.168.1.1";
+    let log_line = "2015-12-04 13:48:28,241 INFO org.apache.hadoop.hdfs.server.datanode.DataNode: Successfully sent block report 0x7aaf8f37153be,  containing 1 storage report(s), of which we sent 1. The reports had 0 total blocks and used 1 RPC(s). This took 0 msec to generate and 2 msecs for RPC and NN processing. Got back one command: FinalizeCommand/5.";
+
+    println!("Log line\n{}", log_line.to_string());
     if let Some(entry) = parse_line(log_line) {
-        println!("Parsed Entry: {:?}", entry);
-        println!("Template: {}", entry.template_str);
+        println!("Parsed Entry: \n{:?}\n", entry);
+        println!("Template: \n{}\n", entry.template_str);
+    } else {
+        println!("Failed to parse line: {}", log_line);
     }
-
-    let log_line_2 = "2024-05-22 10:01:00 ERROR File /var/log/syslog not found";
-    if let Some(entry) = parse_line(log_line_2) {
-        println!("\nParsed Entry: {:?}", entry);
-        println!("Template: {}", entry.template_str);
-    }
-
-    let loglev = LogLevel::DEBUG;
-    println!("log level {}", loglev)
 }
 
 #[cfg(test)]
@@ -176,8 +171,19 @@ mod tests {
             "File <VAR> not found with error code <VAR>"
         );
         assert_eq!(entry.variables, vec!["/var/log/syslog", "404"]);
+    }
 
-        println!("Parsed Entry: {:?}", entry);
-        println!("Template: {}", entry.template_str);
+    #[test]
+    fn test_parse_hdfs_log() {
+        let line = "2016-04-08 16:16:54,636 INFO org.apache.hadoop.hdfs.server.datanode.DataNode.clienttrace: src: /10.10.34.14:46217, dest: /10.10.34.11:50010, bytes: 369192, op: HDFS_WRITE, ";
+        let entry = parse_line(line).unwrap();
+
+        assert_eq!(entry.timestamp, "2016-04-08 16:16:54,636");
+        assert_eq!(entry.verbosity_level, LogLevel::INFO);
+        // "src:" is static, "/10..." is var (digits+path), "dest:" static, "/10..." var, "bytes:" static, "369192," var (digits).
+        assert_eq!(
+            entry.template_str,
+            "org.apache.hadoop.hdfs.server.datanode.DataNode.clienttrace: src: <VAR> dest: <VAR> bytes: <VAR> op: HDFS_WRITE,"
+        );
     }
 }
