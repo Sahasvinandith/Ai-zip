@@ -1,6 +1,8 @@
+use chrono::NaiveDateTime;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fmt;
@@ -23,7 +25,6 @@ impl fmt::Display for LogLevel {
     }
 }
 
-// Helper to parse log level from string
 impl From<&str> for LogLevel {
     fn from(s: &str) -> Self {
         match s.to_uppercase().as_str() {
@@ -44,6 +45,104 @@ pub struct LogEntry {
     pub template_hash: u64,
     pub template_str: String,
     pub variables: Vec<String>,
+}
+
+pub struct LogCompressor {
+    registry: HashMap<u64, u32>,
+    template_store: Vec<String>,
+    ts_col: Vec<u64>,
+    id_col: Vec<u32>,
+    var_col: Vec<String>,
+}
+
+impl LogCompressor {
+    pub fn new() -> Self {
+        LogCompressor {
+            registry: HashMap::new(),
+            template_store: Vec::new(),
+            ts_col: Vec::new(),
+            id_col: Vec::new(),
+            var_col: Vec::new(),
+        }
+    }
+
+    pub fn ingest(&mut self, entry: LogEntry) {
+        // 1. Handle Timestamp
+        // Try parsing different formats.
+        // Format A: "2024-05-22 10:00:00" -> "%Y-%m-%d %H:%M:%S"
+        // Format B: "2016-04-08 16:16:54,636" -> "%Y-%m-%d %H:%M:%S,%f"
+        let ts_millis =
+            if let Ok(dt) = NaiveDateTime::parse_from_str(&entry.timestamp, "%Y-%m-%d %H:%M:%S") {
+                dt.and_utc().timestamp_millis() as u64
+            } else if let Ok(dt) =
+                NaiveDateTime::parse_from_str(&entry.timestamp, "%Y-%m-%d %H:%M:%S,%f")
+            {
+                dt.and_utc().timestamp_millis() as u64
+            } else {
+                // Fallback: current time or 0 if parsing fails drastically (should capture error in real prod)
+                0
+            };
+        self.ts_col.push(ts_millis);
+
+        // 2. Handle Template ID
+        let id = if let Some(&existing_id) = self.registry.get(&entry.template_hash) {
+            existing_id
+        } else {
+            let new_id = self.template_store.len() as u32;
+            self.registry.insert(entry.template_hash, new_id);
+            self.template_store.push(entry.template_str);
+            new_id
+        };
+        self.id_col.push(id);
+
+        // 3. Handle Variables
+        self.var_col.extend(entry.variables);
+    }
+
+    pub fn save(&self, filepath: &str) -> std::io::Result<()> {
+        let file = File::create(filepath)?;
+        let mut writer = std::io::BufWriter::new(file);
+
+        // Header: Magic Bytes
+        writer.write_all(b"SALC")?;
+
+        // Block 1: Compressed Registry (TemplateStore)
+        // We serialize the Vector of strings (index = ID)
+        let registry_data = serde_json::to_vec(&self.template_store)?;
+        let compressed_registry = zstd::encode_all(&registry_data[..], 0)?;
+        writer.write_all(&u32::to_le_bytes(compressed_registry.len() as u32))?; // Write Size
+        writer.write_all(&compressed_registry)?;
+
+        // Block 2: Compressed Timestamps
+        // Convert Vec<u64> to bytes
+        let mut ts_bytes = Vec::with_capacity(self.ts_col.len() * 8);
+        for ts in &self.ts_col {
+            ts_bytes.extend_from_slice(&ts.to_le_bytes());
+        }
+        let compressed_ts = zstd::encode_all(&ts_bytes[..], 0)?;
+        writer.write_all(&u32::to_le_bytes(compressed_ts.len() as u32))?;
+        writer.write_all(&compressed_ts)?;
+
+        // Block 3: Compressed IDs
+        // Convert Vec<u32> to bytes
+        let mut id_bytes = Vec::with_capacity(self.id_col.len() * 4);
+        for id in &self.id_col {
+            id_bytes.extend_from_slice(&id.to_le_bytes());
+        }
+        let compressed_ids = zstd::encode_all(&id_bytes[..], 0)?;
+        writer.write_all(&u32::to_le_bytes(compressed_ids.len() as u32))?;
+        writer.write_all(&compressed_ids)?;
+
+        // Block 4: Compressed Variables
+        // Flattened list serialized to JSON
+        let var_data = serde_json::to_vec(&self.var_col)?;
+        let compressed_vars = zstd::encode_all(&var_data[..], 0)?;
+        writer.write_all(&u32::to_le_bytes(compressed_vars.len() as u32))?;
+        writer.write_all(&compressed_vars)?;
+
+        writer.flush()?;
+        Ok(())
+    }
 }
 
 pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
@@ -140,7 +239,10 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!("Usage: {} <input_log_file> <output_file>", args[0]);
+        eprintln!(
+            "Usage: {} <input_log_file> <output_compressed_file>",
+            args[0]
+        );
         std::process::exit(1);
     }
 
@@ -148,11 +250,12 @@ fn main() -> std::io::Result<()> {
     let output_path = &args[2];
 
     println!("Reading logs from: {}", input_path);
-    println!("Writing output to: {}", output_path);
+    println!("Compressing to: {}", output_path);
 
     let input_file = File::open(input_path)?;
     let reader = BufReader::new(input_file);
-    let mut output_file = File::create(output_path)?;
+
+    let mut compressor = LogCompressor::new();
 
     let mut count = 0;
     for line_result in reader.lines() {
@@ -162,16 +265,16 @@ fn main() -> std::io::Result<()> {
         }
 
         if let Some(entry) = parse_line(&line) {
-            // Serialize to JSON and write to output file
-            let json_entry = serde_json::to_string(&entry)?;
-            writeln!(output_file, "{}", json_entry)?;
+            compressor.ingest(entry);
             count += 1;
         } else {
             eprintln!("Skipping unparsable line: {}", line);
         }
     }
 
-    println!("Successfully processed {} log lines.", count);
+    compressor.save(output_path)?;
+
+    println!("Successfully processed and compressed {} log lines.", count);
     Ok(())
 }
 
