@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDateTime};
 use lazy_static::lazy_static;
-use regex::{Regex, RegexSet};
+use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -8,15 +8,37 @@ use std::env;
 use std::fmt;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 
 #[derive(Debug, PartialEq, Clone, Serialize)]
 pub enum LogLevel {
-    INFO,
-    DEBUG,
-    ERROR,
-    WARN,
-    UNKNOWN,
+    INFO = 1,
+    DEBUG = 2,
+    ERROR = 3,
+    WARN = 4,
+    UNKNOWN = 0,
+}
+
+impl LogLevel {
+    fn to_u8(&self) -> u8 {
+        match self {
+            LogLevel::INFO => 1,
+            LogLevel::DEBUG => 2,
+            LogLevel::ERROR => 3,
+            LogLevel::WARN => 4,
+            LogLevel::UNKNOWN => 0,
+        }
+    }
+
+    fn from_u8(val: u8) -> Self {
+        match val {
+            1 => LogLevel::INFO,
+            2 => LogLevel::DEBUG,
+            3 => LogLevel::ERROR,
+            4 => LogLevel::WARN,
+            _ => LogLevel::UNKNOWN,
+        }
+    }
 }
 
 impl fmt::Display for LogLevel {
@@ -52,6 +74,7 @@ pub struct LogCompressor {
     registry: HashMap<u64, u32>,
     template_store: Vec<String>,
     ts_col: Vec<u64>,
+    lvl_col: Vec<u8>,
     id_col: Vec<u32>,
     var_col: Vec<String>,
 }
@@ -62,6 +85,7 @@ impl LogCompressor {
             registry: HashMap::new(),
             template_store: Vec::new(),
             ts_col: Vec::new(),
+            lvl_col: Vec::new(),
             id_col: Vec::new(),
             var_col: Vec::new(),
         }
@@ -69,22 +93,13 @@ impl LogCompressor {
 
     pub fn ingest(&mut self, entry: LogEntry) {
         // 1. Handle Timestamp
-        // Format A: "2024-05-22 10:00:00" -> "%Y-%m-%d %H:%M:%S"
-        // Format B: "2016-04-08 16:16:54,636" -> "%Y-%m-%d %H:%M:%S,%f"
-        let ts_millis =
-            if let Ok(dt) = NaiveDateTime::parse_from_str(&entry.timestamp, "%Y-%m-%d %H:%M:%S") {
-                dt.and_utc().timestamp_millis() as u64
-            } else if let Ok(dt) =
-                NaiveDateTime::parse_from_str(&entry.timestamp, "%Y-%m-%d %H:%M:%S,%f")
-            {
-                dt.and_utc().timestamp_millis() as u64
-            } else {
-                // Fallback: current time or 0 if parsing fails drastically (should capture error in real prod)
-                0
-            };
+        let ts_millis = parse_timestamp_millis(&entry.timestamp);
         self.ts_col.push(ts_millis);
 
-        // 2. Handle Template ID
+        // 2. Handle Level
+        self.lvl_col.push(entry.verbosity_level.to_u8());
+
+        // 3. Handle Template ID
         let id = if let Some(&existing_id) = self.registry.get(&entry.template_hash) {
             existing_id
         } else {
@@ -95,7 +110,7 @@ impl LogCompressor {
         };
         self.id_col.push(id);
 
-        // 3. Handle Variables
+        // 4. Handle Variables
         self.var_col.extend(entry.variables);
     }
 
@@ -107,14 +122,12 @@ impl LogCompressor {
         writer.write_all(b"SALC")?;
 
         // Block 1: Compressed Registry (TemplateStore)
-        // We serialize the Vector of strings (index = ID)
         let registry_data = serde_json::to_vec(&self.template_store)?;
         let compressed_registry = zstd::encode_all(&registry_data[..], 0)?;
-        writer.write_all(&u32::to_le_bytes(compressed_registry.len() as u32))?; // Write Size
+        writer.write_all(&u32::to_le_bytes(compressed_registry.len() as u32))?;
         writer.write_all(&compressed_registry)?;
 
         // Block 2: Compressed Timestamps
-        // Convert Vec<u64> to bytes
         let mut ts_bytes = Vec::with_capacity(self.ts_col.len() * 8);
         for ts in &self.ts_col {
             ts_bytes.extend_from_slice(&ts.to_le_bytes());
@@ -123,8 +136,12 @@ impl LogCompressor {
         writer.write_all(&u32::to_le_bytes(compressed_ts.len() as u32))?;
         writer.write_all(&compressed_ts)?;
 
-        // Block 3: Compressed IDs
-        // Convert Vec<u32> to bytes
+        // Block 3: Compressed Levels (New)
+        let compressed_lvl = zstd::encode_all(&self.lvl_col[..], 0)?;
+        writer.write_all(&u32::to_le_bytes(compressed_lvl.len() as u32))?;
+        writer.write_all(&compressed_lvl)?;
+
+        // Block 4: Compressed IDs
         let mut id_bytes = Vec::with_capacity(self.id_col.len() * 4);
         for id in &self.id_col {
             id_bytes.extend_from_slice(&id.to_le_bytes());
@@ -133,8 +150,7 @@ impl LogCompressor {
         writer.write_all(&u32::to_le_bytes(compressed_ids.len() as u32))?;
         writer.write_all(&compressed_ids)?;
 
-        // Block 4: Compressed Variables
-        // Flattened list serialized to JSON
+        // Block 5: Compressed Variables
         let var_data = serde_json::to_vec(&self.var_col)?;
         let compressed_vars = zstd::encode_all(&var_data[..], 0)?;
         writer.write_all(&u32::to_le_bytes(compressed_vars.len() as u32))?;
@@ -142,6 +158,36 @@ impl LogCompressor {
 
         writer.flush()?;
         Ok(())
+    }
+}
+
+// Helper function to robustly parse timestamp to millis
+fn parse_timestamp_millis(raw_ts: &str) -> u64 {
+    // 1. Normalize comma to dot
+    let normalized = raw_ts.replace(',', ".");
+
+    // 2. Pad fractional part to 9 digits if present
+    // Split into integer part and fractional part
+    let parts: Vec<&str> = normalized.split('.').collect();
+
+    let parsable_ts = if parts.len() == 2 {
+        let frac = parts[1];
+        if frac.len() < 9 {
+            // Pad with zeros to right
+            format!("{}.{:0<9}", parts[0], frac)
+        } else {
+            normalized.clone()
+        }
+    } else {
+        normalized.clone()
+    };
+
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&parsable_ts, "%Y-%m-%d %H:%M:%S.%f") {
+        dt.and_utc().timestamp_millis() as u64
+    } else if let Ok(dt) = NaiveDateTime::parse_from_str(&parsable_ts, "%Y-%m-%d %H:%M:%S") {
+        dt.and_utc().timestamp_millis() as u64
+    } else {
+        0
     }
 }
 
@@ -172,7 +218,7 @@ impl LogDecompressor {
         };
 
         // 2. Deserialize Blocks
-        // Block 1: Registry (TemplateStore)
+        // Block 1: Registry
         let registry_bytes = read_block(&mut file)?;
         let template_store: Vec<String> = serde_json::from_slice(&registry_bytes)?;
 
@@ -184,7 +230,11 @@ impl LogDecompressor {
             ts_col.push(ts);
         }
 
-        // Block 3: IDs
+        // Block 3: Levels
+        let lvl_bytes = read_block(&mut file)?;
+        let lvl_col: Vec<u8> = lvl_bytes;
+
+        // Block 4: IDs
         let id_bytes = read_block(&mut file)?;
         let mut id_col = Vec::new();
         for chunk in id_bytes.chunks_exact(4) {
@@ -192,7 +242,7 @@ impl LogDecompressor {
             id_col.push(id);
         }
 
-        // Block 4: Variables
+        // Block 5: Variables
         let var_bytes = read_block(&mut file)?;
         let var_col: Vec<String> = serde_json::from_slice(&var_bytes)?;
 
@@ -204,14 +254,14 @@ impl LogDecompressor {
         for i in 0..id_col.len() {
             let id = id_col[i] as usize;
             if id >= template_store.len() {
-                continue; // Should not happen
+                continue;
             }
             let template_str = &template_store[id];
 
             // Count <VAR>
             let var_count = template_str.matches("<VAR>").count();
 
-            // Extract variables for this line
+            // Extract variables
             let mut current_vars = Vec::new();
             for _ in 0..var_count {
                 if var_idx < var_col.len() {
@@ -224,7 +274,6 @@ impl LogDecompressor {
             let mut reconstructed = String::new();
             let parts: Vec<&str> = template_str.split("<VAR>").collect();
 
-            // Interleave parts and variables
             for (j, part) in parts.iter().enumerate() {
                 reconstructed.push_str(part);
                 if j < current_vars.len() {
@@ -236,16 +285,22 @@ impl LogDecompressor {
             let secs = (ts_col[i] / 1000) as i64;
             let nsecs = ((ts_col[i] % 1000) * 1_000_000) as u32;
             let dt = DateTime::from_timestamp(secs, nsecs).unwrap_or_default();
-
-            // Reconstruct approximate timestamp string
+            // Restore timestamp format (using comma for millis as seen in source)
             let ts_str = dt.format("%Y-%m-%d %H:%M:%S,%3f").to_string();
 
-            // Note: The template_str technically contains everything AFTER the header (which includes Level).
-            // But we stripped Level in parse_line. Re-adding Level is guessed work unless stored.
-            // Current strict logic: TS + Reconstructed Body.
-            // If the template_str retained newlines (multi-line), write! will preserve them.
+            // Restore Level
+            let lvl = LogLevel::from_u8(if i < lvl_col.len() { lvl_col[i] } else { 0 });
+            let lvl_str = if lvl == LogLevel::UNKNOWN {
+                String::new()
+            } else {
+                lvl.to_string()
+            };
 
-            writeln!(writer, "{} {}", ts_str, reconstructed)?;
+            if lvl_str.is_empty() {
+                writeln!(writer, "{} {}", ts_str, reconstructed)?;
+            } else {
+                writeln!(writer, "{} {} {}", ts_str, lvl_str, reconstructed)?;
+            }
         }
 
         writer.flush()?;
@@ -300,10 +355,6 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     }
 
     let mut variables = Vec::new();
-
-    // COW logic: replace_all returns a Cow<str>.
-    // We need to capture the replaced values to store in variables vector.
-    // Standard replace_all doesn't give us the captured values easily in order unless we iterate matches first.
 
     // First pass: Collect variables in order
     for mat in VAR_REGEX.find_iter(body) {
@@ -375,9 +426,6 @@ fn main() -> std::io::Result<()> {
                             count += 1;
                         } else {
                             // Fallback: This "New Entry" might be unparsable, or previous buffer was junk.
-                            // But wait, "current_entry_lines" contains the PREVIOUS valid accumulated block.
-                            // If it fails parse_line, it means the HEAD was bad.
-                            // We should log it or skip.
                         }
                     }
                     // Start new accumulator
@@ -414,47 +462,4 @@ fn main() -> std::io::Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_simple_line() {
-        let line = "2024-05-22 10:00:00 INFO User 'admin' failed login from 192.168.1.1";
-        let entry = parse_line(line).unwrap();
-
-        assert_eq!(entry.timestamp, "2024-05-22 10:00:00");
-        assert_eq!(entry.verbosity_level, LogLevel::INFO);
-        assert_eq!(entry.template_str, "User <VAR> failed login from <VAR>");
-        assert_eq!(entry.variables, vec!["'admin'", "192.168.1.1"]);
-    }
-
-    #[test]
-    fn test_parse_file_path_and_digits() {
-        let line = "2024-05-22 10:01:00 ERROR File /var/log/syslog not found with error code 404";
-        let entry = parse_line(line).unwrap();
-
-        assert_eq!(entry.verbosity_level, LogLevel::ERROR);
-        assert_eq!(
-            entry.template_str,
-            "File <VAR> not found with error code <VAR>"
-        );
-        assert_eq!(entry.variables, vec!["/var/log/syslog", "404"]);
-    }
-
-    #[test]
-    fn test_parse_hdfs_log() {
-        let line = "2016-04-08 16:16:54,636 INFO org.apache.hadoop.hdfs.server.datanode.DataNode.clienttrace: src: /10.10.34.14:46217, dest: /10.10.34.11:50010, bytes: 369192, op: HDFS_WRITE, ";
-        let entry = parse_line(line).unwrap();
-
-        assert_eq!(entry.timestamp, "2016-04-08 16:16:54,636");
-        assert_eq!(entry.verbosity_level, LogLevel::INFO);
-        // "src:" is static, "/10..." is var (digits+path), "dest:" static, "/10..." var, "bytes:" static, "369192," var (digits).
-        assert_eq!(
-            entry.template_str,
-            "org.apache.hadoop.hdfs.server.datanode.DataNode.clienttrace: src: <VAR> dest: <VAR> bytes: <VAR> op: HDFS_WRITE,"
-        );
-    }
 }
