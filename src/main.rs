@@ -297,9 +297,9 @@ impl LogDecompressor {
             };
 
             if lvl_str.is_empty() {
-                writeln!(writer, "{} {}", ts_str, reconstructed)?;
+                write!(writer, "{} {}", ts_str, reconstructed)?;
             } else {
-                writeln!(writer, "{} {} {}", ts_str, lvl_str, reconstructed)?;
+                write!(writer, "{} {} {}", ts_str, lvl_str, reconstructed)?;
             }
         }
 
