@@ -1,6 +1,6 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime};
 use lazy_static::lazy_static;
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -8,7 +8,7 @@ use std::env;
 use std::fmt;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 
 #[derive(Debug, PartialEq, Clone, Serialize)]
 pub enum LogLevel {
@@ -25,6 +25,7 @@ impl fmt::Display for LogLevel {
     }
 }
 
+// Helper to parse log level from string
 impl From<&str> for LogLevel {
     fn from(s: &str) -> Self {
         match s.to_uppercase().as_str() {
@@ -68,7 +69,6 @@ impl LogCompressor {
 
     pub fn ingest(&mut self, entry: LogEntry) {
         // 1. Handle Timestamp
-        // Try parsing different formats.
         // Format A: "2024-05-22 10:00:00" -> "%Y-%m-%d %H:%M:%S"
         // Format B: "2016-04-08 16:16:54,636" -> "%Y-%m-%d %H:%M:%S,%f"
         let ts_millis =
@@ -145,16 +145,120 @@ impl LogCompressor {
     }
 }
 
+pub struct LogDecompressor;
+
+impl LogDecompressor {
+    pub fn decompress(input_path: &str, output_path: &str) -> std::io::Result<()> {
+        let mut file = File::open(input_path)?;
+
+        // 1. Magic Bytes check
+        let mut magic = [0u8; 4];
+        file.read_exact(&mut magic)?;
+        if &magic != b"SALC" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid file format",
+            ));
+        }
+
+        // Helper to read compressed block
+        let read_block = |f: &mut File| -> std::io::Result<Vec<u8>> {
+            let mut size_buf = [0u8; 4];
+            f.read_exact(&mut size_buf)?;
+            let size = u32::from_le_bytes(size_buf) as usize;
+            let mut compressed_data = vec![0u8; size];
+            f.read_exact(&mut compressed_data)?;
+            zstd::decode_all(&compressed_data[..])
+        };
+
+        // 2. Deserialize Blocks
+        // Block 1: Registry (TemplateStore)
+        let registry_bytes = read_block(&mut file)?;
+        let template_store: Vec<String> = serde_json::from_slice(&registry_bytes)?;
+
+        // Block 2: Timestamps
+        let ts_bytes = read_block(&mut file)?;
+        let mut ts_col = Vec::new();
+        for chunk in ts_bytes.chunks_exact(8) {
+            let ts = u64::from_le_bytes(chunk.try_into().unwrap());
+            ts_col.push(ts);
+        }
+
+        // Block 3: IDs
+        let id_bytes = read_block(&mut file)?;
+        let mut id_col = Vec::new();
+        for chunk in id_bytes.chunks_exact(4) {
+            let id = u32::from_le_bytes(chunk.try_into().unwrap());
+            id_col.push(id);
+        }
+
+        // Block 4: Variables
+        let var_bytes = read_block(&mut file)?;
+        let var_col: Vec<String> = serde_json::from_slice(&var_bytes)?;
+
+        // 3. Reconstruction Loop
+        let output_file = File::create(output_path)?;
+        let mut writer = std::io::BufWriter::new(output_file);
+
+        let mut var_idx = 0;
+        for i in 0..id_col.len() {
+            let id = id_col[i] as usize;
+            if id >= template_store.len() {
+                continue; // Should not happen
+            }
+            let template_str = &template_store[id];
+
+            // Count <VAR>
+            let var_count = template_str.matches("<VAR>").count();
+
+            // Extract variables for this line
+            let mut current_vars = Vec::new();
+            for _ in 0..var_count {
+                if var_idx < var_col.len() {
+                    current_vars.push(&var_col[var_idx]);
+                    var_idx += 1;
+                }
+            }
+
+            // Interpolate
+            let mut reconstructed = String::new();
+            let parts: Vec<&str> = template_str.split("<VAR>").collect();
+
+            // Interleave parts and variables
+            for (j, part) in parts.iter().enumerate() {
+                reconstructed.push_str(part);
+                if j < current_vars.len() {
+                    reconstructed.push_str(current_vars[j]);
+                }
+            }
+
+            // Format Timestamp
+            let secs = (ts_col[i] / 1000) as i64;
+            let nsecs = ((ts_col[i] % 1000) * 1_000_000) as u32;
+            let dt = DateTime::from_timestamp(secs, nsecs).unwrap_or_default();
+
+            // Reconstruct approximate timestamp string
+            let ts_str = dt.format("%Y-%m-%d %H:%M:%S,%3f").to_string();
+
+            // Note: The template_str technically contains everything AFTER the header (which includes Level).
+            // But we stripped Level in parse_line. Re-adding Level is guessed work unless stored.
+            // Current strict logic: TS + Reconstructed Body.
+            // If the template_str retained newlines (multi-line), write! will preserve them.
+
+            writeln!(writer, "{} {}", ts_str, reconstructed)?;
+        }
+
+        writer.flush()?;
+        Ok(())
+    }
+}
+
 pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     // Step A: Header Parsing
     // Regex matches: Timestamp (simplified) and Level
-    // Assuming format like: "2024-05-22 10:00:00 INFO Body..."
-    // Adjust regex based on specific timestamp format requirements
     lazy_static! {
-        // Updated regex to include comma in timestamp characters [\d:,]+
-        static ref HEADER_RE: Regex = Regex::new(r"^(?P<ts>[\d\-]+\s[\d:,]+)\s+(?P<lvl>\w+)\s+").unwrap();
-        static ref IP_RE: Regex = Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$").unwrap();
-        static ref DIGIT_RE: Regex = Regex::new(r"\d").unwrap();
+        // Timestamp + Level (greedy whitespace match after level)
+        static ref HEADER_RE: Regex = Regex::new(r"^(?P<ts>[\d\-]+\s[\d:,]+)\s+(?P<lvl>\w+)\s").unwrap();
     }
 
     let caps = HEADER_RE.captures(raw_line)?;
@@ -162,68 +266,57 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     let level_str = caps.name("lvl")?.as_str();
     let verbosity_level = LogLevel::from(level_str);
 
-    let body_start = caps.get(0)?.end();
-    let body = &raw_line[body_start..];
+    // Body Extraction
+    let match_end = caps.get(0)?.end();
+    let body = &raw_line[match_end..]; // Everything after "YYYY.. LEVEL "
 
-    // Step B: Tokenization
-    // Splitting by spaces
-    let tokens: Vec<&str> = body.split_whitespace().collect();
+    // Structure Preserving Replacement Logic
+    // We want to replace Variables with <VAR> but keep whitespace/newlines intact.
+    // Order matters in regex alternation constructed via ORing:
+    // 1. Strings (Quotes)
+    // 2. IP Addresses
+    // 3. Paths (heuristic: contains / and maybe digits/dots/hyphens)
+    // 4. Digits (integers, decimals)
 
-    let mut template_parts = Vec::new();
-    let mut variables = Vec::new();
-
-    // Speculative component extraction:
-    // If the first token looks like "[Component]" or "Component:", take it.
-    // For now, adhering strictly to "Split by spaces" for tokens.
-    // User requirement: "component: (String, optional - e.g., 'AuthSystem')"
-    // We'll treat the rest as the message body for template generation.
-
-    for token in tokens {
-        // Step C: Variable Detection
-        let mut is_variable = false;
-
-        // 1. Contains digits
-        if DIGIT_RE.is_match(token) {
-            is_variable = true;
-        }
-        // 2. Is IP address (IPv4)
-        else if IP_RE.is_match(token) {
-            is_variable = true;
-        }
-        // 3. Inside quotes or brackets (simple check: starts/ends with quotes/brackets)
-        else if (token.starts_with('\'') && token.ends_with('\''))
-            || (token.starts_with('"') && token.ends_with('"'))
-            || (token.starts_with('[') && token.ends_with(']'))
-        {
-            is_variable = true;
-        }
-        // 4. Is a file path (contains /)
-        else if token.contains('/') {
-            is_variable = true;
-        }
-
-        // Step D: Template Generation
-        if is_variable {
-            template_parts.push("<VAR>");
-            variables.push(token.to_string());
-        } else {
-            template_parts.push(token);
-        }
+    // Combining into one massive regex is safer for tokenization-replacement
+    lazy_static! {
+        static ref VAR_REGEX: Regex = Regex::new(
+            r#"(?x)
+            # 1. Quoted Strings (Single or Double)
+            (['"][^'"]*['"]) |
+            # 2. IP Addresses (IPv4)
+            (\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b) |
+            # 3. File Paths (Must contain /, allowing alphanumeric, dots, hyphens, underscores)
+            ([\w\.\-_]*\/[\w\.\-/_]*) |
+            # 4. Digits (Hex, Decimals, Integers) - \b boundary check to avoid partial word match?
+            # Relaxed: just sequences of digits if not part of a word?
+            # Or safer: \b\d+\b ? Let's use user's heuristic: "Contains digits" token. 
+            # Implies: if a word has a digit, it's a var? Regex replace is trickier.
+            # Let's stick to explicit Digits or WordsWithDigits
+            (\b\w*\d\w*\b)
+            "#
+        )
+        .unwrap();
     }
 
-    let template_str = template_parts.join(" ");
+    let mut variables = Vec::new();
 
-    // Calculate Template Hash
+    // COW logic: replace_all returns a Cow<str>.
+    // We need to capture the replaced values to store in variables vector.
+    // Standard replace_all doesn't give us the captured values easily in order unless we iterate matches first.
+
+    // First pass: Collect variables in order
+    for mat in VAR_REGEX.find_iter(body) {
+        variables.push(mat.as_str().to_string());
+    }
+
+    // Second pass: Replace with <VAR>
+    let template_str = VAR_REGEX.replace_all(body, "<VAR>").to_string();
+
     let mut hasher = DefaultHasher::new();
     template_str.hash(&mut hasher);
     let template_hash = hasher.finish();
 
-    // Component extraction is heuristic.
-    // If the body starts with something like "[AuthSystem]", let's strip it from variables?
-    // The prompt implies component is a field, but doesn't strictly say HOW to extract it.
-    // I will leave it as None for now unless explicit "Component" field logic is required,
-    // or parse it if it looks like a component.
-    // For this implementation, I'll default to None to keep it clean unless a pattern emerges.
     let component = None;
 
     Some(LogEntry {
@@ -236,45 +329,90 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     })
 }
 
+// Function to check if a line is a start of a new log entry
+fn is_log_start(line: &str) -> bool {
+    lazy_static! {
+        static ref START_RE: Regex = Regex::new(r"^\d{4}-\d{2}-\d{2}").unwrap();
+    }
+    START_RE.is_match(line)
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
+    if args.len() < 4 {
+        eprintln!("Usage: {} <mode> <input_file> <output_file>", args[0]);
         eprintln!(
-            "Usage: {} <input_log_file> <output_compressed_file>",
-            args[0]
+            "Modes: \n  compress   - Compress log file to .salc\n  decompress - Decompress .salc file to text"
         );
         std::process::exit(1);
     }
 
-    let input_path = &args[1];
-    let output_path = &args[2];
+    let mode = &args[1];
+    let input_path = &args[2];
+    let output_path = &args[3];
 
-    println!("Reading logs from: {}", input_path);
-    println!("Compressing to: {}", output_path);
+    match mode.as_str() {
+        "compress" => {
+            println!("Compressing {} -> {}", input_path, output_path);
+            let input_file = File::open(input_path)?;
+            let mut reader = BufReader::new(input_file);
 
-    let input_file = File::open(input_path)?;
-    let reader = BufReader::new(input_file);
+            let mut compressor = LogCompressor::new();
+            let mut count = 0;
 
-    let mut compressor = LogCompressor::new();
+            // Multi-line Aggregation Loop
+            let mut current_entry_lines = String::new();
 
-    let mut count = 0;
-    for line_result in reader.lines() {
-        let line = line_result?;
-        if line.trim().is_empty() {
-            continue;
+            let mut line_buffer = String::new();
+            while reader.read_line(&mut line_buffer)? > 0 {
+                // Check if this line starts a new log entry
+                if is_log_start(&line_buffer) {
+                    // If we have a previous entry accumulated, process it
+                    if !current_entry_lines.is_empty() {
+                        // Parse and Ingest
+                        if let Some(entry) = parse_line(&current_entry_lines) {
+                            compressor.ingest(entry);
+                            count += 1;
+                        } else {
+                            // Fallback: This "New Entry" might be unparsable, or previous buffer was junk.
+                            // But wait, "current_entry_lines" contains the PREVIOUS valid accumulated block.
+                            // If it fails parse_line, it means the HEAD was bad.
+                            // We should log it or skip.
+                        }
+                    }
+                    // Start new accumulator
+                    current_entry_lines = line_buffer.clone();
+                } else {
+                    // Continuation line (Stack trace, etc.)
+                    // Append to current accumulator
+                    current_entry_lines.push_str(&line_buffer);
+                }
+
+                line_buffer.clear();
+            }
+
+            // Process the final accumulated entry
+            if !current_entry_lines.is_empty() {
+                if let Some(entry) = parse_line(&current_entry_lines) {
+                    compressor.ingest(entry);
+                    count += 1;
+                }
+            }
+
+            compressor.save(output_path)?;
+            println!("Done. Processed {} entries.", count);
         }
-
-        if let Some(entry) = parse_line(&line) {
-            compressor.ingest(entry);
-            count += 1;
-        } else {
-            eprintln!("Skipping unparsable line: {}", line);
+        "decompress" => {
+            println!("Decompressing {} -> {}", input_path, output_path);
+            LogDecompressor::decompress(input_path, output_path)?;
+            println!("Done.");
+        }
+        _ => {
+            eprintln!("Invalid mode. Use 'compress' or 'decompress'.");
+            std::process::exit(1);
         }
     }
 
-    compressor.save(output_path)?;
-
-    println!("Successfully processed and compressed {} log lines.", count);
     Ok(())
 }
 
