@@ -32,7 +32,7 @@ fn main() -> std::io::Result<()> {
             let input_file = File::open(input_path)?;
             let mut reader = BufReader::new(input_file);
 
-            let mut compressor = LogCompressor::new();
+            let mut compressor = LogCompressor::new(output_path)?;
             let mut count = 0;
 
             // Multi-line Aggregation Loop
@@ -46,7 +46,7 @@ fn main() -> std::io::Result<()> {
                     if !current_entry_lines.is_empty() {
                         // Parse and Ingest
                         if let Some(entry) = parse_line(&current_entry_lines) {
-                            compressor.ingest(entry);
+                            compressor.ingest(entry)?;
                             count += 1;
                         } else {
                             // Fallback: This "New Entry" might be unparsable, or previous buffer was junk.
@@ -66,12 +66,12 @@ fn main() -> std::io::Result<()> {
             // Process the final accumulated entry
             if !current_entry_lines.is_empty() {
                 if let Some(entry) = parse_line(&current_entry_lines) {
-                    compressor.ingest(entry);
+                    compressor.ingest(entry)?;
                     count += 1;
                 }
             }
 
-            compressor.save(output_path)?;
+            compressor.finish()?;
             println!("Done. Processed {} entries.", count);
         }
         "decompress" => {

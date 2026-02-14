@@ -12,21 +12,35 @@ pub struct LogCompressor {
     lvl_col: Vec<u8>,
     id_col: Vec<u32>,
     var_col: Vec<String>,
+    writer: std::io::BufWriter<File>,
+    max_lines_per_chunk: usize,
+    current_line_count: usize,
+    last_template_count: usize,
 }
 
 impl LogCompressor {
-    pub fn new() -> Self {
-        LogCompressor {
+    pub fn new(filepath: &str) -> std::io::Result<Self> {
+        let file = File::create(filepath)?;
+        let mut writer = std::io::BufWriter::new(file);
+
+        // Write Header immediately
+        writer.write_all(b"SALC")?;
+
+        Ok(LogCompressor {
             registry: HashMap::new(),
             template_store: Vec::new(),
             ts_col: Vec::new(),
             lvl_col: Vec::new(),
             id_col: Vec::new(),
             var_col: Vec::new(),
-        }
+            writer,
+            max_lines_per_chunk: 200_000, // Default chunk size
+            current_line_count: 0,
+            last_template_count: 0,
+        })
     }
 
-    pub fn ingest(&mut self, entry: LogEntry) {
+    pub fn ingest(&mut self, entry: LogEntry) -> std::io::Result<()> {
         // 1. Handle Timestamp
         let ts_millis = parse_timestamp_millis(&entry.timestamp);
         self.ts_col.push(ts_millis);
@@ -47,20 +61,31 @@ impl LogCompressor {
 
         // 4. Handle Variables
         self.var_col.extend(entry.variables);
+
+        self.current_line_count += 1;
+
+        if self.current_line_count >= self.max_lines_per_chunk {
+            self.flush_chunk()?;
+        }
+        Ok(())
     }
 
-    pub fn save(&self, filepath: &str) -> std::io::Result<()> {
-        let file = File::create(filepath)?;
-        let mut writer = std::io::BufWriter::new(file);
+    fn flush_chunk(&mut self) -> std::io::Result<()> {
+        if self.current_line_count == 0 {
+            return Ok(());
+        }
 
-        // Header: Magic Bytes
-        writer.write_all(b"SALC")?;
+        let writer = &mut self.writer;
 
-        // Block 1: Compressed Registry (TemplateStore)
-        let registry_data = serde_json::to_vec(&self.template_store)?;
+        // Block 1: Registry Delta (Only new templates)
+        let new_templates = &self.template_store[self.last_template_count..];
+        let registry_data = serde_json::to_vec(new_templates)?;
         let compressed_registry = zstd::encode_all(&registry_data[..], 0)?;
         writer.write_all(&u32::to_le_bytes(compressed_registry.len() as u32))?;
         writer.write_all(&compressed_registry)?;
+
+        // Update valid count
+        self.last_template_count = self.template_store.len();
 
         // Block 2: Compressed Timestamps
         let mut ts_bytes = Vec::with_capacity(self.ts_col.len() * 8);
@@ -71,7 +96,7 @@ impl LogCompressor {
         writer.write_all(&u32::to_le_bytes(compressed_ts.len() as u32))?;
         writer.write_all(&compressed_ts)?;
 
-        // Block 3: Compressed Levels (New)
+        // Block 3: Compressed Levels
         let compressed_lvl = zstd::encode_all(&self.lvl_col[..], 0)?;
         writer.write_all(&u32::to_le_bytes(compressed_lvl.len() as u32))?;
         writer.write_all(&compressed_lvl)?;
@@ -91,7 +116,19 @@ impl LogCompressor {
         writer.write_all(&u32::to_le_bytes(compressed_vars.len() as u32))?;
         writer.write_all(&compressed_vars)?;
 
-        writer.flush()?;
+        // Clear Buffers
+        self.ts_col.clear();
+        self.lvl_col.clear();
+        self.id_col.clear();
+        self.var_col.clear();
+        self.current_line_count = 0;
+
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> std::io::Result<()> {
+        self.flush_chunk()?;
+        self.writer.flush()?;
         Ok(())
     }
 }
