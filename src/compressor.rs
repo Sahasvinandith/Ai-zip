@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 
-use crate::models::{CompressedChunk, LogEntry, LogLevel, PreDigestedEntry, RawChunk};
+use crate::models::{CompressedChunk, PreDigestedEntry, RawChunk};
+// use crate::models::{CompressedChunk, LogEntry, LogLevel, PreDigestedEntry, RawChunk};
+// Removed unused imports
 use std::sync::{Arc, RwLock};
 
 // 1. Chunk Accumulator (Single Threaded - Fast)
@@ -172,6 +174,8 @@ pub fn compress_chunk(raw: RawChunk) -> std::io::Result<CompressedChunk> {
 // 3. Writer (Single Threaded - Serial)
 pub struct ChunkWriter {
     writer: std::io::BufWriter<File>,
+    buffer: Vec<u8>,
+    buffer_limit: usize,
 }
 
 impl ChunkWriter {
@@ -179,36 +183,71 @@ impl ChunkWriter {
         let file = File::create(filepath)?;
         let mut writer = std::io::BufWriter::new(file);
         writer.write_all(b"SALC")?;
-        Ok(ChunkWriter { writer })
+        Ok(ChunkWriter {
+            writer,
+            buffer: Vec::with_capacity(20 * 1024 * 1024), // Pre-alloc 20MB
+            buffer_limit: 20 * 1024 * 500,
+        })
     }
 
     pub fn write_chunk(&mut self, chunk: CompressedChunk) -> std::io::Result<()> {
-        let writer = &mut self.writer;
+        // Calculate total size of this chunk payload
+        let chunk_size = 4
+            + chunk.registry_blob.len()
+            + 4
+            + chunk.ts_blob.len()
+            + 4
+            + chunk.lvl_blob.len()
+            + 4
+            + chunk.id_blob.len()
+            + 4
+            + chunk.var_blob.len();
 
+        // Flush if buffer would overflow
+        let val = self.buffer.len() + chunk_size > self.buffer_limit;
+        if val {
+            println!("Flushing buffer");
+            self.writer.write_all(&self.buffer)?;
+            println!("Flushed buffer");
+            self.buffer.clear();
+        }
+
+        println!("valuer - {}", val);
+
+        // Write to Memory Buffer
         // 1. Registry
-        writer.write_all(&u32::to_le_bytes(chunk.registry_blob.len() as u32))?;
-        writer.write_all(&chunk.registry_blob)?;
+        self.buffer
+            .extend_from_slice(&u32::to_le_bytes(chunk.registry_blob.len() as u32));
+        self.buffer.extend_from_slice(&chunk.registry_blob);
 
         // 2. Timestamps
-        writer.write_all(&u32::to_le_bytes(chunk.ts_blob.len() as u32))?;
-        writer.write_all(&chunk.ts_blob)?;
+        self.buffer
+            .extend_from_slice(&u32::to_le_bytes(chunk.ts_blob.len() as u32));
+        self.buffer.extend_from_slice(&chunk.ts_blob);
 
         // 3. Levels
-        writer.write_all(&u32::to_le_bytes(chunk.lvl_blob.len() as u32))?;
-        writer.write_all(&chunk.lvl_blob)?;
+        self.buffer
+            .extend_from_slice(&u32::to_le_bytes(chunk.lvl_blob.len() as u32));
+        self.buffer.extend_from_slice(&chunk.lvl_blob);
 
         // 4. IDs
-        writer.write_all(&u32::to_le_bytes(chunk.id_blob.len() as u32))?;
-        writer.write_all(&chunk.id_blob)?;
+        self.buffer
+            .extend_from_slice(&u32::to_le_bytes(chunk.id_blob.len() as u32));
+        self.buffer.extend_from_slice(&chunk.id_blob);
 
         // 5. Variables
-        writer.write_all(&u32::to_le_bytes(chunk.var_blob.len() as u32))?;
-        writer.write_all(&chunk.var_blob)?;
+        self.buffer
+            .extend_from_slice(&u32::to_le_bytes(chunk.var_blob.len() as u32));
+        self.buffer.extend_from_slice(&chunk.var_blob);
 
         Ok(())
     }
 
     pub fn finish(&mut self) -> std::io::Result<()> {
+        if !self.buffer.is_empty() {
+            self.writer.write_all(&self.buffer)?;
+            self.buffer.clear();
+        }
         self.writer.flush()?;
         Ok(())
     }

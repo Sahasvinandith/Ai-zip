@@ -14,7 +14,7 @@ use std::thread;
 use compressor::{ChunkWriter, LogAccumulator, SharedRegistry, compress_chunk};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use decompressor::LogDecompressor;
-use models::{CompressedChunk, LogEntry, PreDigestedEntry, RawChunk};
+use models::{CompressedChunk, PreDigestedEntry, RawChunk};
 use parser::{is_log_start, parse_line};
 
 fn main() -> std::io::Result<()> {
@@ -179,6 +179,7 @@ fn main() -> std::io::Result<()> {
 
                     while let Some(chunk) = chunk_buffer.remove(&next_chunk_id) {
                         println!("Writing start");
+                        // println!("writing chunk {:?}", chunk);
                         chunk_writer.write_chunk(chunk)?;
                         println!("Writing finish");
                         next_chunk_id += 1;
