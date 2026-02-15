@@ -60,3 +60,23 @@ pub struct LogEntry {
     pub template_str: String,
     pub variables: Vec<String>,
 }
+
+#[derive(Debug)]
+pub struct RawChunk {
+    pub chunk_id: usize,
+    pub registry_delta: Vec<String>,
+    pub ts_col: Vec<u64>,
+    pub lvl_col: Vec<u8>,
+    pub id_col: Vec<u32>,
+    pub var_col: Vec<String>,
+}
+
+pub struct CompressedChunk {
+    pub chunk_id: usize,
+    pub raw_size_bytes: usize, // For stats
+    pub registry_blob: Vec<u8>,
+    pub ts_blob: Vec<u8>,
+    pub lvl_blob: Vec<u8>,
+    pub id_blob: Vec<u8>,
+    pub var_blob: Vec<u8>,
+}

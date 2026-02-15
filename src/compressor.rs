@@ -3,44 +3,39 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 
-use crate::models::LogEntry;
+use crate::models::{CompressedChunk, LogEntry, RawChunk};
 
-pub struct LogCompressor {
+// 1. Chunk Accumulator (Single Threaded - Fast)
+pub struct LogAccumulator {
     registry: HashMap<u64, u32>,
     template_store: Vec<String>,
     ts_col: Vec<u64>,
     lvl_col: Vec<u8>,
     id_col: Vec<u32>,
     var_col: Vec<String>,
-    writer: std::io::BufWriter<File>,
     max_lines_per_chunk: usize,
     current_line_count: usize,
     last_template_count: usize,
+    chunk_counter: usize,
 }
 
-impl LogCompressor {
-    pub fn new(filepath: &str) -> std::io::Result<Self> {
-        let file = File::create(filepath)?;
-        let mut writer = std::io::BufWriter::new(file);
-
-        // Write Header immediately
-        writer.write_all(b"SALC")?;
-
-        Ok(LogCompressor {
+impl LogAccumulator {
+    pub fn new() -> Self {
+        LogAccumulator {
             registry: HashMap::new(),
             template_store: Vec::new(),
             ts_col: Vec::new(),
             lvl_col: Vec::new(),
             id_col: Vec::new(),
             var_col: Vec::new(),
-            writer,
-            max_lines_per_chunk: 200_000, // Default chunk size
+            max_lines_per_chunk: 200_000,
             current_line_count: 0,
             last_template_count: 0,
-        })
+            chunk_counter: 0,
+        }
     }
 
-    pub fn ingest(&mut self, entry: LogEntry) -> std::io::Result<()> {
+    pub fn ingest(&mut self, entry: LogEntry) -> Option<RawChunk> {
         // 1. Handle Timestamp
         let ts_millis = parse_timestamp_millis(&entry.timestamp);
         self.ts_col.push(ts_millis);
@@ -64,70 +59,126 @@ impl LogCompressor {
 
         self.current_line_count += 1;
 
+        println!("Current line count: {}", self.current_line_count);
+
         if self.current_line_count >= self.max_lines_per_chunk {
-            self.flush_chunk()?;
+            println!("Chunk size exceeded. Taking chunk.");
+            return Some(self.take_chunk());
         }
-        Ok(())
+        None
     }
 
-    fn flush_chunk(&mut self) -> std::io::Result<()> {
-        if self.current_line_count == 0 {
-            return Ok(());
-        }
-
-        let writer = &mut self.writer;
-
-        // Block 1: Registry Delta (Only new templates)
-        let new_templates = &self.template_store[self.last_template_count..];
-        let registry_data = serde_json::to_vec(new_templates)?;
-        let compressed_registry = zstd::encode_all(&registry_data[..], 0)?;
-        writer.write_all(&u32::to_le_bytes(compressed_registry.len() as u32))?;
-        writer.write_all(&compressed_registry)?;
-
-        // Update valid count
+    pub fn take_chunk(&mut self) -> RawChunk {
+        let registry_delta = self.template_store[self.last_template_count..].to_vec();
         self.last_template_count = self.template_store.len();
 
-        // Block 2: Compressed Timestamps
-        let mut ts_bytes = Vec::with_capacity(self.ts_col.len() * 8);
-        for ts in &self.ts_col {
-            ts_bytes.extend_from_slice(&ts.to_le_bytes());
-        }
-        let compressed_ts = zstd::encode_all(&ts_bytes[..], 0)?;
-        writer.write_all(&u32::to_le_bytes(compressed_ts.len() as u32))?;
-        writer.write_all(&compressed_ts)?;
+        let chunk = RawChunk {
+            chunk_id: self.chunk_counter,
+            registry_delta,
+            ts_col: std::mem::take(&mut self.ts_col),
+            lvl_col: std::mem::take(&mut self.lvl_col),
+            id_col: std::mem::take(&mut self.id_col),
+            var_col: std::mem::take(&mut self.var_col),
+        };
 
-        // Block 3: Compressed Levels
-        let compressed_lvl = zstd::encode_all(&self.lvl_col[..], 0)?;
-        writer.write_all(&u32::to_le_bytes(compressed_lvl.len() as u32))?;
-        writer.write_all(&compressed_lvl)?;
-
-        // Block 4: Compressed IDs
-        let mut id_bytes = Vec::with_capacity(self.id_col.len() * 4);
-        for id in &self.id_col {
-            id_bytes.extend_from_slice(&id.to_le_bytes());
-        }
-        let compressed_ids = zstd::encode_all(&id_bytes[..], 0)?;
-        writer.write_all(&u32::to_le_bytes(compressed_ids.len() as u32))?;
-        writer.write_all(&compressed_ids)?;
-
-        // Block 5: Compressed Variables
-        let var_data = serde_json::to_vec(&self.var_col)?;
-        let compressed_vars = zstd::encode_all(&var_data[..], 0)?;
-        writer.write_all(&u32::to_le_bytes(compressed_vars.len() as u32))?;
-        writer.write_all(&compressed_vars)?;
-
-        // Clear Buffers
-        self.ts_col.clear();
-        self.lvl_col.clear();
-        self.id_col.clear();
-        self.var_col.clear();
+        self.chunk_counter += 1;
         self.current_line_count = 0;
+
+        // Re-allocate with capacity to avoid frequent reallocs
+        self.ts_col.reserve(self.max_lines_per_chunk);
+        self.lvl_col.reserve(self.max_lines_per_chunk);
+        self.id_col.reserve(self.max_lines_per_chunk);
+        self.var_col.reserve(self.max_lines_per_chunk * 2); // heuristic
+
+        chunk
+    }
+}
+
+// 2. Compression Logic (Stateless - Parallel)
+pub fn compress_chunk(raw: RawChunk) -> std::io::Result<CompressedChunk> {
+    let mut raw_size = 0;
+
+    // 1. Registry
+    let registry_data = serde_json::to_vec(&raw.registry_delta)?;
+    raw_size += registry_data.len();
+    let registry_blob = zstd::encode_all(&registry_data[..], 0)?;
+
+    // 2. Timestamps
+    let mut ts_bytes = Vec::with_capacity(raw.ts_col.len() * 8);
+    for ts in &raw.ts_col {
+        ts_bytes.extend_from_slice(&ts.to_le_bytes());
+    }
+    raw_size += ts_bytes.len();
+    let ts_blob = zstd::encode_all(&ts_bytes[..], 0)?;
+
+    // 3. Levels
+    raw_size += raw.lvl_col.len();
+    let lvl_blob = zstd::encode_all(&raw.lvl_col[..], 0)?;
+
+    // 4. IDs
+    let mut id_bytes = Vec::with_capacity(raw.id_col.len() * 4);
+    for id in &raw.id_col {
+        id_bytes.extend_from_slice(&id.to_le_bytes());
+    }
+    raw_size += id_bytes.len();
+    let id_blob = zstd::encode_all(&id_bytes[..], 0)?;
+
+    // 5. Variables
+    let var_data = serde_json::to_vec(&raw.var_col)?;
+    raw_size += var_data.len();
+    let var_blob = zstd::encode_all(&var_data[..], 0)?;
+
+    Ok(CompressedChunk {
+        chunk_id: raw.chunk_id,
+        raw_size_bytes: raw_size,
+        registry_blob,
+        ts_blob,
+        lvl_blob,
+        id_blob,
+        var_blob,
+    })
+}
+
+// 3. Writer (Single Threaded - Serial)
+pub struct ChunkWriter {
+    writer: std::io::BufWriter<File>,
+}
+
+impl ChunkWriter {
+    pub fn new(filepath: &str) -> std::io::Result<Self> {
+        let file = File::create(filepath)?;
+        let mut writer = std::io::BufWriter::new(file);
+        writer.write_all(b"SALC")?;
+        Ok(ChunkWriter { writer })
+    }
+
+    pub fn write_chunk(&mut self, chunk: CompressedChunk) -> std::io::Result<()> {
+        let writer = &mut self.writer;
+
+        // 1. Registry
+        writer.write_all(&u32::to_le_bytes(chunk.registry_blob.len() as u32))?;
+        writer.write_all(&chunk.registry_blob)?;
+
+        // 2. Timestamps
+        writer.write_all(&u32::to_le_bytes(chunk.ts_blob.len() as u32))?;
+        writer.write_all(&chunk.ts_blob)?;
+
+        // 3. Levels
+        writer.write_all(&u32::to_le_bytes(chunk.lvl_blob.len() as u32))?;
+        writer.write_all(&chunk.lvl_blob)?;
+
+        // 4. IDs
+        writer.write_all(&u32::to_le_bytes(chunk.id_blob.len() as u32))?;
+        writer.write_all(&chunk.id_blob)?;
+
+        // 5. Variables
+        writer.write_all(&u32::to_le_bytes(chunk.var_blob.len() as u32))?;
+        writer.write_all(&chunk.var_blob)?;
 
         Ok(())
     }
 
     pub fn finish(&mut self) -> std::io::Result<()> {
-        self.flush_chunk()?;
         self.writer.flush()?;
         Ok(())
     }

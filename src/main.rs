@@ -10,10 +10,10 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::thread;
 
-use compressor::LogCompressor;
+use compressor::{ChunkWriter, LogAccumulator, compress_chunk};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use decompressor::LogDecompressor;
-use models::LogEntry;
+use models::{CompressedChunk, LogEntry, RawChunk};
 use parser::{is_log_start, parse_line};
 
 fn main() -> std::io::Result<()> {
@@ -34,7 +34,7 @@ fn main() -> std::io::Result<()> {
     let output_path = &args[3];
 
     // Simple argument parsing for --threads
-    let mut num_threads = 4; // Default
+    let mut num_threads = 8; // Default
     if args.len() >= 6 && args[4] == "--threads" {
         if let Ok(n) = args[5].parse::<usize>() {
             num_threads = n;
@@ -49,18 +49,34 @@ fn main() -> std::io::Result<()> {
             );
 
             // 1. Setup Channels
-            // Job: (Sequence ID, Log String)
-            // Result: (Sequence ID, Option<LogEntry>)
+            // Parse Pipeline: Job -> Result
             let (job_tx, job_rx): (Sender<(usize, String)>, Receiver<(usize, String)>) =
-                bounded(1000);
+                bounded(100000);
             let (res_tx, res_rx): (
                 Sender<(usize, Option<LogEntry>)>,
                 Receiver<(usize, Option<LogEntry>)>,
-            ) = bounded(1000);
+            ) = bounded(100000);
 
-            // 2. Spawn Workers
+            // Compress Pipeline: RawChunk -> CompressedChunk
+            let (raw_chunk_tx, raw_chunk_rx): (Sender<RawChunk>, Receiver<RawChunk>) = bounded(50);
+            let (comp_chunk_tx, comp_chunk_rx): (
+                Sender<CompressedChunk>,
+                Receiver<CompressedChunk>,
+            ) = bounded(50);
+
+            // 2. Spawn Parse Workers
+            // Use 75% of threads for parsing, 25% for compression (simplified heuristic)
+            // Or just use num_threads for parsing and num_threads/2 for compression
+            let parse_threads = num_threads;
+            let compress_threads = if num_threads > 2 { num_threads / 2 } else { 1 };
+
+            println!(
+                "Spawning {} Parse Workers and {} Compress Workers",
+                parse_threads, compress_threads
+            );
+
             let mut worker_handles = Vec::new();
-            for _ in 0..num_threads {
+            for _ in 0..parse_threads {
                 let job_rx_clone = job_rx.clone();
                 let res_tx_clone = res_tx.clone();
                 worker_handles.push(thread::spawn(move || {
@@ -68,18 +84,17 @@ fn main() -> std::io::Result<()> {
                         let parsed = parse_line(&line);
                         // Send result back
                         if res_tx_clone.send((seq, parsed)).is_err() {
-                            break; // Main thread likely dropped receiver
+                            break;
                         }
                     }
                 }));
             }
-            // Drop original tx so receiver closes when all workers are done
-            drop(res_tx);
+            drop(res_tx); // Close locally
 
-            // 3. Spawn Sequencer (Writer)
-            let output_path_clone = output_path.to_string();
-            let writer_handle = thread::spawn(move || -> std::io::Result<usize> {
-                let mut compressor = LogCompressor::new(&output_path_clone)?;
+            // 3. Spawn Sequencer (Batcher)
+            // Re-orders logs and fills RawChunks
+            let sequencer_handle = thread::spawn(move || -> std::io::Result<usize> {
+                let mut accumulator = LogAccumulator::new();
                 let mut buffer: HashMap<usize, Option<LogEntry>> = HashMap::new();
                 let mut next_expected_seq = 0;
                 let mut count = 0;
@@ -90,17 +105,69 @@ fn main() -> std::io::Result<()> {
                     // Drain buffer in order
                     while let Some(item) = buffer.remove(&next_expected_seq) {
                         if let Some(valid_entry) = item {
-                            compressor.ingest(valid_entry)?;
+                            if let Some(chunk) = accumulator.ingest(valid_entry) {
+                                raw_chunk_tx.send(chunk).expect("Compressors died");
+                            }
                             count += 1;
                         }
                         next_expected_seq += 1;
                     }
                 }
-                compressor.finish()?;
+
+                // Flush last partial chunk
+                let last_chunk = accumulator.take_chunk();
+                if !last_chunk.ts_col.is_empty() {
+                    raw_chunk_tx.send(last_chunk).expect("Compressors died");
+                }
+
                 Ok(count)
             });
 
-            // 4. Reader (Main Thread)
+            // 4. Spawn Compress Workers
+            let mut compress_handles = Vec::new();
+            for _ in 0..compress_threads {
+                let raw_rx = raw_chunk_rx.clone();
+                let comp_tx = comp_chunk_tx.clone();
+                compress_handles.push(thread::spawn(move || {
+                    for raw_chunk in raw_rx {
+                        match compress_chunk(raw_chunk) {
+                            Ok(comp_chunk) => {
+                                if comp_tx.send(comp_chunk).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => eprintln!("Compression error: {}", e),
+                        }
+                    }
+                }));
+            }
+            // drop(raw_chunk_tx); // Moved to sequencer, no need to drop
+            drop(comp_chunk_tx); // Close unused sender so writer can finish
+
+            // 5. Spawn Writer (Filesystem)
+            // Re-orders chunks and writes to file
+            let output_path_clone = output_path.to_string();
+            let writer_handle = thread::spawn(move || -> std::io::Result<()> {
+                let mut chunk_writer = ChunkWriter::new(&output_path_clone)?;
+                let mut chunk_buffer: HashMap<usize, CompressedChunk> = HashMap::new();
+                let mut next_chunk_id = 0;
+
+                for comp_chunk in comp_chunk_rx {
+                    chunk_buffer.insert(comp_chunk.chunk_id, comp_chunk);
+
+                    while let Some(chunk) = chunk_buffer.remove(&next_chunk_id) {
+                        println!("Writing start");
+                        chunk_writer.write_chunk(chunk)?;
+                        println!("Writing finish");
+                        next_chunk_id += 1;
+                    }
+                }
+                chunk_writer.finish()?;
+
+                Ok(())
+            });
+
+            // 6. Reader (Main Thread)
             let input_file = File::open(input_path)?;
             let mut reader = BufReader::new(input_file);
             let mut current_entry_lines = String::new();
@@ -110,7 +177,6 @@ fn main() -> std::io::Result<()> {
             while reader.read_line(&mut line_buffer)? > 0 {
                 if is_log_start(&line_buffer) {
                     if !current_entry_lines.is_empty() {
-                        // Push Job
                         job_tx
                             .send((seq_counter, current_entry_lines.clone()))
                             .expect("Workers died");
@@ -128,20 +194,25 @@ fn main() -> std::io::Result<()> {
                 job_tx
                     .send((seq_counter, current_entry_lines))
                     .expect("Workers died");
-                // seq_counter += 1; // Unnecessary for last element
             }
-
-            // Close Job Queue
             drop(job_tx);
 
-            // 5. Wait for Workers
+            // 7. Clean up
             for h in worker_handles {
-                h.join().expect("Worker panicked");
+                h.join().expect("Parse Worker panicked");
             }
 
-            // 6. Wait for Writer
-            let count = writer_handle.join().expect("Writer panicked")?;
-            println!("Done. Processed {} entries.", count);
+            let total_entries = sequencer_handle.join().expect("Sequencer panicked")?;
+            // Sequencer finishing closes raw_chunk_tx, which stops Compressors
+
+            for h in compress_handles {
+                h.join().expect("Compress Worker panicked");
+            }
+            // Compressors finishing closes comp_chunk_tx, which stops Writer
+
+            writer_handle.join().expect("Writer panicked")?;
+
+            println!("Done. Processed {} entries.", total_entries);
         }
         "decompress" => {
             println!("Decompressing {} -> {}", input_path, output_path);
