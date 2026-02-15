@@ -62,6 +62,14 @@ pub struct LogEntry {
 }
 
 #[derive(Debug)]
+pub struct PreDigestedEntry {
+    pub timestamp: String,
+    pub verbosity_level: LogLevel,
+    pub template_id: u32,
+    pub variables: Vec<String>,
+}
+
+#[derive(Debug)]
 pub struct RawChunk {
     pub chunk_id: usize,
     pub registry_delta: Vec<String>,

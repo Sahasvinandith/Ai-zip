@@ -8,12 +8,13 @@ use std::env;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
+use std::sync::Arc;
 use std::thread;
 
-use compressor::{ChunkWriter, LogAccumulator, compress_chunk};
+use compressor::{ChunkWriter, LogAccumulator, SharedRegistry, compress_chunk};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use decompressor::LogDecompressor;
-use models::{CompressedChunk, LogEntry, RawChunk};
+use models::{CompressedChunk, LogEntry, PreDigestedEntry, RawChunk};
 use parser::{is_log_start, parse_line};
 
 fn main() -> std::io::Result<()> {
@@ -49,12 +50,12 @@ fn main() -> std::io::Result<()> {
             );
 
             // 1. Setup Channels
-            // Parse Pipeline: Job -> Result
+            // Parse Pipeline: Job -> Result (PreDigestedEntry)
             let (job_tx, job_rx): (Sender<(usize, String)>, Receiver<(usize, String)>) =
                 bounded(100000);
             let (res_tx, res_rx): (
-                Sender<(usize, Option<LogEntry>)>,
-                Receiver<(usize, Option<LogEntry>)>,
+                Sender<(usize, Option<PreDigestedEntry>)>,
+                Receiver<(usize, Option<PreDigestedEntry>)>,
             ) = bounded(100000);
 
             // Compress Pipeline: RawChunk -> CompressedChunk
@@ -63,6 +64,9 @@ fn main() -> std::io::Result<()> {
                 Sender<CompressedChunk>,
                 Receiver<CompressedChunk>,
             ) = bounded(50);
+
+            // Universal Shared Registry
+            let registry = Arc::new(SharedRegistry::new());
 
             // 2. Spawn Parse Workers
             // Use 75% of threads for parsing, 25% for compression (simplified heuristic)
@@ -75,16 +79,33 @@ fn main() -> std::io::Result<()> {
                 parse_threads, compress_threads
             );
 
-            let mut worker_handles = Vec::new();
+            let mut worker_handles = Vec::new(); // sotres handles of parsing threads
             for _ in 0..parse_threads {
                 let job_rx_clone = job_rx.clone();
                 let res_tx_clone = res_tx.clone();
+                let registry_clone = registry.clone(); // Shared Registry
+
                 worker_handles.push(thread::spawn(move || {
                     for (seq, line) in job_rx_clone {
-                        let parsed = parse_line(&line);
-                        // Send result back
-                        if res_tx_clone.send((seq, parsed)).is_err() {
-                            break;
+                        if let Some(entry) = parse_line(&line) {
+                            // Parallel Dictionary Lookup!
+                            let template_id = registry_clone
+                                .get_or_register(entry.template_str, entry.template_hash);
+
+                            let pre_digested = PreDigestedEntry {
+                                timestamp: entry.timestamp,
+                                verbosity_level: entry.verbosity_level,
+                                template_id,
+                                variables: entry.variables,
+                            };
+
+                            if res_tx_clone.send((seq, Some(pre_digested))).is_err() {
+                                break;
+                            }
+                        } else {
+                            if res_tx_clone.send((seq, None)).is_err() {
+                                break;
+                            }
                         }
                     }
                 }));
@@ -93,9 +114,10 @@ fn main() -> std::io::Result<()> {
 
             // 3. Spawn Sequencer (Batcher)
             // Re-orders logs and fills RawChunks
+            let registry_clone2 = registry.clone(); // Sequencer needs registry to get Delta
             let sequencer_handle = thread::spawn(move || -> std::io::Result<usize> {
-                let mut accumulator = LogAccumulator::new();
-                let mut buffer: HashMap<usize, Option<LogEntry>> = HashMap::new();
+                let mut accumulator = LogAccumulator::new(registry_clone2);
+                let mut buffer: HashMap<usize, Option<PreDigestedEntry>> = HashMap::new();
                 let mut next_expected_seq = 0;
                 let mut count = 0;
 
@@ -141,7 +163,7 @@ fn main() -> std::io::Result<()> {
                     }
                 }));
             }
-            // drop(raw_chunk_tx); // Moved to sequencer, no need to drop
+            // drop(raw_chunk_tx); // Moved ownership to sequencer
             drop(comp_chunk_tx); // Close unused sender so writer can finish
 
             // 5. Spawn Writer (Filesystem)

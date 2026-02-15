@@ -3,27 +3,25 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 
-use crate::models::{CompressedChunk, LogEntry, RawChunk};
+use crate::models::{CompressedChunk, LogEntry, LogLevel, PreDigestedEntry, RawChunk};
+use std::sync::{Arc, RwLock};
 
 // 1. Chunk Accumulator (Single Threaded - Fast)
 pub struct LogAccumulator {
-    registry: HashMap<u64, u32>,
-    template_store: Vec<String>,
     ts_col: Vec<u64>,
     lvl_col: Vec<u8>,
     id_col: Vec<u32>,
     var_col: Vec<String>,
     max_lines_per_chunk: usize,
     current_line_count: usize,
-    last_template_count: usize,
+    last_template_count: usize, // We need to track registry state
     chunk_counter: usize,
+    registry: Arc<SharedRegistry>, // Reference to shared registry to get delta
 }
 
 impl LogAccumulator {
-    pub fn new() -> Self {
+    pub fn new(registry: Arc<SharedRegistry>) -> Self {
         LogAccumulator {
-            registry: HashMap::new(),
-            template_store: Vec::new(),
             ts_col: Vec::new(),
             lvl_col: Vec::new(),
             id_col: Vec::new(),
@@ -32,10 +30,11 @@ impl LogAccumulator {
             current_line_count: 0,
             last_template_count: 0,
             chunk_counter: 0,
+            registry,
         }
     }
 
-    pub fn ingest(&mut self, entry: LogEntry) -> Option<RawChunk> {
+    pub fn ingest(&mut self, entry: PreDigestedEntry) -> Option<RawChunk> {
         // 1. Handle Timestamp
         let ts_millis = parse_timestamp_millis(&entry.timestamp);
         self.ts_col.push(ts_millis);
@@ -43,34 +42,26 @@ impl LogAccumulator {
         // 2. Handle Level
         self.lvl_col.push(entry.verbosity_level.to_u8());
 
-        // 3. Handle Template ID
-        let id = if let Some(&existing_id) = self.registry.get(&entry.template_hash) {
-            existing_id
-        } else {
-            let new_id = self.template_store.len() as u32;
-            self.registry.insert(entry.template_hash, new_id);
-            self.template_store.push(entry.template_str);
-            new_id
-        };
-        self.id_col.push(id);
+        // 3. Handle Template ID (Already looked up!)
+        self.id_col.push(entry.template_id);
 
         // 4. Handle Variables
         self.var_col.extend(entry.variables);
 
         self.current_line_count += 1;
 
-        println!("Current line count: {}", self.current_line_count);
-
         if self.current_line_count >= self.max_lines_per_chunk {
-            println!("Chunk size exceeded. Taking chunk.");
             return Some(self.take_chunk());
         }
         None
     }
 
     pub fn take_chunk(&mut self) -> RawChunk {
-        let registry_delta = self.template_store[self.last_template_count..].to_vec();
-        self.last_template_count = self.template_store.len();
+        // Get new templates added since last chunk
+        let current_store = self.registry.template_store.read().unwrap();
+        let registry_delta = current_store[self.last_template_count..].to_vec();
+        self.last_template_count = current_store.len();
+        drop(current_store); // Release lock ASAP
 
         let chunk = RawChunk {
             chunk_id: self.chunk_counter,
@@ -84,13 +75,52 @@ impl LogAccumulator {
         self.chunk_counter += 1;
         self.current_line_count = 0;
 
-        // Re-allocate with capacity to avoid frequent reallocs
+        // Re-allocate
         self.ts_col.reserve(self.max_lines_per_chunk);
         self.lvl_col.reserve(self.max_lines_per_chunk);
         self.id_col.reserve(self.max_lines_per_chunk);
-        self.var_col.reserve(self.max_lines_per_chunk * 2); // heuristic
+        self.var_col.reserve(self.max_lines_per_chunk * 2);
 
         chunk
+    }
+}
+
+// Thread-Safe Registry for Parallel Lookup
+pub struct SharedRegistry {
+    map: RwLock<HashMap<u64, u32>>,
+    template_store: RwLock<Vec<String>>,
+}
+
+impl SharedRegistry {
+    pub fn new() -> Self {
+        SharedRegistry {
+            map: RwLock::new(HashMap::new()),
+            template_store: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn get_or_register(&self, template_str: String, template_hash: u64) -> u32 {
+        // 1. Optimistic Read
+        {
+            let map_read = self.map.read().unwrap();
+            if let Some(&id) = map_read.get(&template_hash) {
+                return id;
+            }
+        }
+
+        // 2. Write (Lock Escalation)
+        let mut map_write = self.map.write().unwrap();
+        let mut store_write = self.template_store.write().unwrap();
+
+        // Double check (another thread might have inserted it)
+        if let Some(&id) = map_write.get(&template_hash) {
+            return id;
+        }
+
+        let new_id = store_write.len() as u32;
+        map_write.insert(template_hash, new_id);
+        store_write.push(template_str);
+        new_id
     }
 }
 
