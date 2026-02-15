@@ -178,10 +178,7 @@ fn main() -> std::io::Result<()> {
                     chunk_buffer.insert(comp_chunk.chunk_id, comp_chunk);
 
                     while let Some(chunk) = chunk_buffer.remove(&next_chunk_id) {
-                        println!("Writing start");
-                        // println!("writing chunk {:?}", chunk);
                         chunk_writer.write_chunk(chunk)?;
-                        println!("Writing finish");
                         next_chunk_id += 1;
                     }
                 }

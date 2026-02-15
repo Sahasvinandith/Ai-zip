@@ -10,7 +10,8 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     // Regex matches: Timestamp (simplified) and Level
     lazy_static! {
         // Timestamp + Level (greedy whitespace match after level)
-        static ref HEADER_RE: Regex = Regex::new(r"^(?P<ts>[\d\-]+\s[\d:,]+)\s+(?P<lvl>\w+)\s").unwrap();
+        // Use [ \t] to avoid matching newlines/CRs
+        static ref HEADER_RE: Regex = Regex::new(r"^(?P<ts>[\d\-]+\s[\d:,]+)\s+(?P<lvl>\w+)[ \t]").unwrap();
     }
 
     let caps = HEADER_RE.captures(raw_line)?;

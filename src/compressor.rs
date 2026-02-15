@@ -186,7 +186,7 @@ impl ChunkWriter {
         Ok(ChunkWriter {
             writer,
             buffer: Vec::with_capacity(20 * 1024 * 1024), // Pre-alloc 20MB
-            buffer_limit: 20 * 1024 * 500,
+            buffer_limit: 20 * 1024 * 1024,
         })
     }
 
@@ -204,15 +204,10 @@ impl ChunkWriter {
             + chunk.var_blob.len();
 
         // Flush if buffer would overflow
-        let val = self.buffer.len() + chunk_size > self.buffer_limit;
-        if val {
-            println!("Flushing buffer");
+        if self.buffer.len() + chunk_size > self.buffer_limit {
             self.writer.write_all(&self.buffer)?;
-            println!("Flushed buffer");
             self.buffer.clear();
         }
-
-        println!("valuer - {}", val);
 
         // Write to Memory Buffer
         // 1. Registry

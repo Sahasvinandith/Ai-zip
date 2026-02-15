@@ -7,6 +7,8 @@ pub enum LogLevel {
     DEBUG = 2,
     ERROR = 3,
     WARN = 4,
+    FATAL = 5,
+    TRACE = 6,
     UNKNOWN = 0,
 }
 
@@ -17,6 +19,8 @@ impl LogLevel {
             LogLevel::DEBUG => 2,
             LogLevel::ERROR => 3,
             LogLevel::WARN => 4,
+            LogLevel::FATAL => 5,
+            LogLevel::TRACE => 6,
             LogLevel::UNKNOWN => 0,
         }
     }
@@ -27,6 +31,8 @@ impl LogLevel {
             2 => LogLevel::DEBUG,
             3 => LogLevel::ERROR,
             4 => LogLevel::WARN,
+            5 => LogLevel::FATAL,
+            6 => LogLevel::TRACE,
             _ => LogLevel::UNKNOWN,
         }
     }
@@ -46,6 +52,8 @@ impl From<&str> for LogLevel {
             "DEBUG" => LogLevel::DEBUG,
             "ERROR" => LogLevel::ERROR,
             "WARN" => LogLevel::WARN,
+            "FATAL" => LogLevel::FATAL,
+            "TRACE" => LogLevel::TRACE,
             _ => LogLevel::UNKNOWN,
         }
     }
