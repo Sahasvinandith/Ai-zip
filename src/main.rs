@@ -34,19 +34,39 @@ fn main() -> std::io::Result<()> {
     let input_path = &args[2];
     let output_path = &args[3];
 
-    // Simple argument parsing for --threads
-    let mut num_threads = 8; // Default
-    if args.len() >= 6 && args[4] == "--threads" {
-        if let Ok(n) = args[5].parse::<usize>() {
-            num_threads = n;
-        }
-    }
-
     match mode.as_str() {
         "compress" => {
+            // Simple argument parsing for --threads and --debug
+            let mut num_threads = 8; // Default
+            let mut debug_mode = false;
+
+            for arg in &args {
+                if arg == "--debug" {
+                    debug_mode = true;
+                }
+                if arg.starts_with("--threads=") {
+                    // Handle --threads=N (not supported in previous loop, simplified here)
+                }
+            }
+            // Better CLI parsing
+            let mut i = 4;
+            while i < args.len() {
+                if args[i] == "--threads" && i + 1 < args.len() {
+                    if let Ok(n) = args[i + 1].parse::<usize>() {
+                        num_threads = n;
+                    }
+                    i += 2;
+                } else if args[i] == "--debug" {
+                    debug_mode = true;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            }
+
             println!(
-                "Compressing {} -> {} using {} threads",
-                input_path, output_path, num_threads
+                "Compressing {} -> {} using {} threads (Debug: {})",
+                input_path, output_path, num_threads, debug_mode
             );
 
             // 1. Setup Channels
@@ -60,6 +80,8 @@ fn main() -> std::io::Result<()> {
 
             // Compress Pipeline: RawChunk -> CompressedChunk
             let (raw_chunk_tx, raw_chunk_rx): (Sender<RawChunk>, Receiver<RawChunk>) = bounded(50);
+
+            // Only need comp_chunk channels if NOT debug mode
             let (comp_chunk_tx, comp_chunk_rx): (
                 Sender<CompressedChunk>,
                 Receiver<CompressedChunk>,
@@ -69,15 +91,19 @@ fn main() -> std::io::Result<()> {
             let registry = Arc::new(SharedRegistry::new());
 
             // 2. Spawn Parse Workers
-            // Use 75% of threads for parsing, 25% for compression (simplified heuristic)
-            // Or just use num_threads for parsing and num_threads/2 for compression
             let parse_threads = num_threads;
-            let compress_threads = if num_threads > 2 { num_threads / 2 } else { 1 };
+            // In DEBUG mode, we might want minimal compression threads or none if we skip it
+            // Implementation: Debug mode skips Zstd compression entirely.
+            // So we don't spawn compress workers or Writer for CompressedChunks.
+            // Instead we spawn a Debug Writer that takes RawChunks directly.
 
-            println!(
-                "Spawning {} Parse Workers and {} Compress Workers",
-                parse_threads, compress_threads
-            );
+            let compress_threads = if debug_mode {
+                0
+            } else {
+                if num_threads > 2 { num_threads / 2 } else { 1 }
+            };
+
+            println!("Spawning {} Parse Workers", parse_threads);
 
             let mut worker_handles = Vec::new(); // sotres handles of parsing threads
             for _ in 0..parse_threads {
@@ -128,7 +154,7 @@ fn main() -> std::io::Result<()> {
                     while let Some(item) = buffer.remove(&next_expected_seq) {
                         if let Some(valid_entry) = item {
                             if let Some(chunk) = accumulator.ingest(valid_entry) {
-                                raw_chunk_tx.send(chunk).expect("Compressors died");
+                                raw_chunk_tx.send(chunk).expect("Downstream died");
                             }
                             count += 1;
                         }
@@ -139,53 +165,87 @@ fn main() -> std::io::Result<()> {
                 // Flush last partial chunk
                 let last_chunk = accumulator.take_chunk();
                 if !last_chunk.ts_col.is_empty() {
-                    raw_chunk_tx.send(last_chunk).expect("Compressors died");
+                    raw_chunk_tx.send(last_chunk).expect("Downstream died");
                 }
 
                 Ok(count)
             });
 
-            // 4. Spawn Compress Workers
+            // 4. BRANCH: Debug vs Standard
+            let writer_handle;
             let mut compress_handles = Vec::new();
-            for _ in 0..compress_threads {
-                let raw_rx = raw_chunk_rx.clone();
-                let comp_tx = comp_chunk_tx.clone();
-                compress_handles.push(thread::spawn(move || {
-                    for raw_chunk in raw_rx {
-                        match compress_chunk(raw_chunk) {
-                            Ok(comp_chunk) => {
-                                if comp_tx.send(comp_chunk).is_err() {
-                                    break;
+
+            if debug_mode {
+                // DEBUG PIPELINE: Sequencer -> DebugWriter (Consumer)
+                // No intermediate compression threads.
+                // We reuse the main thread or spawn a thread for writing to keep main for reading.
+
+                let output_path_clone = output_path.to_string();
+                let registry_clone3 = registry.clone();
+
+                writer_handle = thread::spawn(move || -> std::io::Result<()> {
+                    // Be careful: raw_chunk_rx needs to be consumed.
+                    let mut debug_writer =
+                        compressor::DebugChunkWriter::new(&output_path_clone, registry_clone3)?;
+
+                    // We need to re-order RawChunks?
+                    // Actually Sequencer produces RawChunks in order (chunk_counter increment).
+                    // So we can just consume them directly from channel.
+
+                    for raw_chunk in raw_chunk_rx {
+                        debug_writer.write_chunk(raw_chunk)?;
+                    }
+                    debug_writer.finish()?;
+                    Ok(())
+                });
+
+                // We don't use comp_chunk_tx
+                drop(comp_chunk_tx);
+            } else {
+                // STANDARD PIPELINE: Sequencer -> Compressors -> Writer
+
+                println!("Spawning {} Compress Workers", compress_threads);
+
+                // 4. Spawn Compress Workers
+                for _ in 0..compress_threads {
+                    let raw_rx = raw_chunk_rx.clone();
+                    let comp_tx = comp_chunk_tx.clone();
+                    compress_handles.push(thread::spawn(move || {
+                        for raw_chunk in raw_rx {
+                            match compress_chunk(raw_chunk) {
+                                Ok(comp_chunk) => {
+                                    if comp_tx.send(comp_chunk).is_err() {
+                                        break;
+                                    }
                                 }
+                                Err(e) => eprintln!("Compression error: {}", e),
                             }
-                            Err(e) => eprintln!("Compression error: {}", e),
+                        }
+                    }));
+                }
+                drop(comp_chunk_tx); // Close unused sender so writer can finish
+
+                // 5. Spawn Writer (Filesystem)
+                // Re-orders chunks and writes to file
+                let output_path_clone = output_path.to_string();
+                writer_handle = thread::spawn(move || -> std::io::Result<()> {
+                    let mut chunk_writer = ChunkWriter::new(&output_path_clone)?;
+                    let mut chunk_buffer: HashMap<usize, CompressedChunk> = HashMap::new();
+                    let mut next_chunk_id = 0;
+
+                    for comp_chunk in comp_chunk_rx {
+                        chunk_buffer.insert(comp_chunk.chunk_id, comp_chunk);
+
+                        while let Some(chunk) = chunk_buffer.remove(&next_chunk_id) {
+                            chunk_writer.write_chunk(chunk)?;
+                            next_chunk_id += 1;
                         }
                     }
-                }));
+                    chunk_writer.finish()?;
+
+                    Ok(())
+                });
             }
-            // drop(raw_chunk_tx); // Moved ownership to sequencer
-            drop(comp_chunk_tx); // Close unused sender so writer can finish
-
-            // 5. Spawn Writer (Filesystem)
-            // Re-orders chunks and writes to file
-            let output_path_clone = output_path.to_string();
-            let writer_handle = thread::spawn(move || -> std::io::Result<()> {
-                let mut chunk_writer = ChunkWriter::new(&output_path_clone)?;
-                let mut chunk_buffer: HashMap<usize, CompressedChunk> = HashMap::new();
-                let mut next_chunk_id = 0;
-
-                for comp_chunk in comp_chunk_rx {
-                    chunk_buffer.insert(comp_chunk.chunk_id, comp_chunk);
-
-                    while let Some(chunk) = chunk_buffer.remove(&next_chunk_id) {
-                        chunk_writer.write_chunk(chunk)?;
-                        next_chunk_id += 1;
-                    }
-                }
-                chunk_writer.finish()?;
-
-                Ok(())
-            });
 
             // 6. Reader (Main Thread)
             let input_file = File::open(input_path)?;

@@ -124,6 +124,31 @@ impl SharedRegistry {
         store_write.push(template_str);
         new_id
     }
+
+    pub fn dump(&self) -> Vec<(u32, u64, String)> {
+        let store = self.template_store.read().unwrap();
+        let map = self.map.read().unwrap();
+
+        let mut result = Vec::with_capacity(store.len());
+
+        // Invert map for display: map is Hash -> ID
+        // unique ID -> Hash (One-to-one mapping in theory, but multiple hashes could map to same ID if collision logic was weird, but here it's 1:1)
+        // Actually, get_or_register: if hash exists -> return ID.
+        // So multiple hashes could point to same ID?
+        // No, map.insert(hash, new_id). New ID is only created if hash NOT in map.
+        // So Hash <-> ID is 1:1.
+
+        // Let's iterate the map to link Hash to ID.
+        for (&hash, &id) in map.iter() {
+            if (id as usize) < store.len() {
+                result.push((id, hash, store[id as usize].clone()));
+            }
+        }
+
+        // Sort by ID
+        result.sort_by_key(|k| k.0);
+        result
+    }
 }
 
 // 2. Compression Logic (Stateless - Parallel)
@@ -242,6 +267,63 @@ impl ChunkWriter {
         if !self.buffer.is_empty() {
             self.writer.write_all(&self.buffer)?;
             self.buffer.clear();
+        }
+        self.writer.flush()?;
+        Ok(())
+    }
+}
+
+pub struct DebugChunkWriter {
+    writer: std::io::BufWriter<File>,
+    registry_ref: Arc<SharedRegistry>,
+}
+
+impl DebugChunkWriter {
+    pub fn new(filepath: &str, registry_ref: Arc<SharedRegistry>) -> std::io::Result<Self> {
+        let file = File::create(filepath)?;
+        let writer = std::io::BufWriter::new(file);
+        Ok(DebugChunkWriter {
+            writer,
+            registry_ref,
+        })
+    }
+
+    pub fn write_chunk(&mut self, chunk: RawChunk) -> std::io::Result<()> {
+        writeln!(self.writer, "=== CHUNK {} ===", chunk.chunk_id)?;
+        writeln!(self.writer, "Rows: {}", chunk.ts_col.len())?;
+
+        writeln!(
+            self.writer,
+            "TS_COL (First 10): {:?}",
+            chunk.ts_col.iter().take(10).collect::<Vec<_>>()
+        )?;
+        writeln!(
+            self.writer,
+            "LVL_COL (First 10): {:?}",
+            chunk.lvl_col.iter().take(10).collect::<Vec<_>>()
+        )?;
+        writeln!(
+            self.writer,
+            "ID_COL (First 10): {:?}",
+            chunk.id_col.iter().take(10).collect::<Vec<_>>()
+        )?;
+        writeln!(
+            self.writer,
+            "VAR_COL (First 10): {:?}",
+            chunk.var_col.iter().take(10).collect::<Vec<_>>()
+        )?;
+
+        writeln!(self.writer, "================\n")?;
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> std::io::Result<()> {
+        writeln!(self.writer, "=== REGISTRY DUMP ===")?;
+        let snapshot = self.registry_ref.dump();
+        // snapshot is already sorted by ID in dump()
+
+        for (id, hash, tmpl) in snapshot {
+            writeln!(self.writer, "{}: [{:016x}] \"{}\"", id, hash, tmpl)?;
         }
         self.writer.flush()?;
         Ok(())
