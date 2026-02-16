@@ -316,11 +316,47 @@ impl DebugChunkWriter {
         writeln!(self.writer, "================\n")?;
         Ok(())
     }
-
     pub fn finish(&mut self) -> std::io::Result<()> {
         writeln!(self.writer, "=== REGISTRY DUMP ===")?;
         let snapshot = self.registry_ref.dump();
-        // snapshot is already sorted by ID in dump()
+        for (id, hash, tmpl) in snapshot {
+            writeln!(self.writer, "{}: [{:016x}] \"{}\"", id, hash, tmpl)?;
+        }
+        self.writer.flush()?;
+        Ok(())
+    }
+}
+
+pub struct BenchmarkWriter {
+    writer: std::io::BufWriter<File>,
+    registry_ref: Arc<SharedRegistry>,
+    total_rows: usize,
+}
+
+impl BenchmarkWriter {
+    pub fn new(filepath: &str, registry_ref: Arc<SharedRegistry>) -> std::io::Result<Self> {
+        let file = File::create(filepath)?;
+        let writer = std::io::BufWriter::new(file);
+        Ok(BenchmarkWriter {
+            writer,
+            registry_ref,
+            total_rows: 0,
+        })
+    }
+
+    pub fn write_chunk(&mut self, chunk: RawChunk) -> std::io::Result<()> {
+        self.total_rows += chunk.ts_col.len();
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> std::io::Result<()> {
+        writeln!(
+            self.writer,
+            "Benchmark Complete. Processed {} rows.",
+            self.total_rows
+        )?;
+        writeln!(self.writer, "=== REGISTRY DUMP ===")?;
+        let snapshot = self.registry_ref.dump();
 
         for (id, hash, tmpl) in snapshot {
             writeln!(self.writer, "{}: [{:016x}] \"{}\"", id, hash, tmpl)?;

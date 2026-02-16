@@ -36,9 +36,10 @@ fn main() -> std::io::Result<()> {
 
     match mode.as_str() {
         "compress" => {
-            // Simple argument parsing for --threads and --debug
+            // Simple argument parsing for --threads, --debug, --benchmark
             let mut num_threads = 8; // Default
             let mut debug_mode = false;
+            let mut benchmark_mode = false;
 
             for arg in &args {
                 if arg == "--debug" {
@@ -59,14 +60,17 @@ fn main() -> std::io::Result<()> {
                 } else if args[i] == "--debug" {
                     debug_mode = true;
                     i += 1;
+                } else if args[i] == "--benchmark" {
+                    benchmark_mode = true;
+                    i += 1;
                 } else {
                     i += 1;
                 }
             }
 
             println!(
-                "Compressing {} -> {} using {} threads (Debug: {})",
-                input_path, output_path, num_threads, debug_mode
+                "Compressing {} -> {} using {} threads (Debug: {}, Benchmark: {})",
+                input_path, output_path, num_threads, debug_mode, benchmark_mode
             );
 
             // 1. Setup Channels
@@ -81,7 +85,7 @@ fn main() -> std::io::Result<()> {
             // Compress Pipeline: RawChunk -> CompressedChunk
             let (raw_chunk_tx, raw_chunk_rx): (Sender<RawChunk>, Receiver<RawChunk>) = bounded(50);
 
-            // Only need comp_chunk channels if NOT debug mode
+            // Only need comp_chunk channels if NOT debug/benchmark mode
             let (comp_chunk_tx, comp_chunk_rx): (
                 Sender<CompressedChunk>,
                 Receiver<CompressedChunk>,
@@ -97,7 +101,7 @@ fn main() -> std::io::Result<()> {
             // So we don't spawn compress workers or Writer for CompressedChunks.
             // Instead we spawn a Debug Writer that takes RawChunks directly.
 
-            let compress_threads = if debug_mode {
+            let compress_threads = if debug_mode || benchmark_mode {
                 0
             } else {
                 if num_threads > 2 { num_threads / 2 } else { 1 }
@@ -171,7 +175,7 @@ fn main() -> std::io::Result<()> {
                 Ok(count)
             });
 
-            // 4. BRANCH: Debug vs Standard
+            // 4. BRANCH: Debug vs Benchmark vs Standard
             let writer_handle;
             let mut compress_handles = Vec::new();
 
@@ -200,6 +204,20 @@ fn main() -> std::io::Result<()> {
                 });
 
                 // We don't use comp_chunk_tx
+                drop(comp_chunk_tx);
+            } else if benchmark_mode {
+                let output_path_clone = output_path.to_string();
+                let registry_clone3 = registry.clone();
+
+                writer_handle = thread::spawn(move || -> std::io::Result<()> {
+                    let mut bench_writer =
+                        compressor::BenchmarkWriter::new(&output_path_clone, registry_clone3)?;
+                    for raw_chunk in raw_chunk_rx {
+                        bench_writer.write_chunk(raw_chunk)?;
+                    }
+                    bench_writer.finish()?;
+                    Ok(())
+                });
                 drop(comp_chunk_tx);
             } else {
                 // STANDARD PIPELINE: Sequencer -> Compressors -> Writer
