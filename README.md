@@ -31,17 +31,22 @@ The compiled binary will be available at `./target/release/AI_zip`.
 
 SALC operates in two primary modes: `compress` and `decompress`.
 
-### Compressing Visual Logs
+### Compressing Logs
 
 To compress a raw log file into the optimized `.salc` format:
 
 ```bash
-cargo run --release -- compress <input_log_file> <output_file.salc>
+cargo run --release -- compress <input_log_file> <output_file.salc> [OPTIONS]
 ```
+
+**Options:**
+*   `--threads <N>`: specifies the number of parallel worker threads (default: 8).
+*   `--debug`: Disables final ZSTD compression and binary packing. Useful for inspecting the internal templating results.
+*   `--benchmark`: Disables all disk I/O and compression. Used specifically to measure the speed of the Drain3-based parsing and variable extraction pipeline.
 
 **Example:**
 ```bash
-cargo run --release -- compress system.log compressed.salc
+cargo run --release -- compress system.log compressed.salc --threads 12
 ```
 
 ### Decompressing Logs
