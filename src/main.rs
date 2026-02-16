@@ -1,5 +1,6 @@
 mod compressor;
 mod decompressor;
+mod drain_registry;
 mod models;
 mod parser;
 
@@ -118,15 +119,44 @@ fn main() -> std::io::Result<()> {
                 worker_handles.push(thread::spawn(move || {
                     for (seq, line) in job_rx_clone {
                         if let Some(entry) = parse_line(&line) {
-                            // Parallel Dictionary Lookup!
-                            let template_id = registry_clone
-                                .get_or_register(entry.template_str, entry.template_hash);
+                            // Handle multi-line entries: only send first line to Drain,
+                            // preserve continuation lines as raw content.
+                            let (first_line, continuation) = match entry.template_str.find('\n') {
+                                Some(pos) => {
+                                    (&entry.template_str[..pos], Some(&entry.template_str[pos..]))
+                                }
+                                None => (entry.template_str.as_str(), None),
+                            };
+
+                            // Strip trailing \r from first line before sending to Drain
+                            let drain_input = first_line.trim_end_matches('\r');
+
+                            let (template_id, _final_template_str, mut variables) =
+                                registry_clone.get_or_learn(drain_input);
+
+                            // Append continuation lines as a single raw variable.
+                            // If the first line had a trailing \r (stripped for Drain),
+                            // prepend it to the continuation to preserve \r\n sequence.
+                            if let Some(cont) = continuation {
+                                let has_cr = first_line.ends_with('\r');
+                                if has_cr {
+                                    let mut full_cont = String::with_capacity(1 + cont.len());
+                                    full_cont.push('\r');
+                                    full_cont.push_str(cont);
+                                    variables.push(full_cont);
+                                } else {
+                                    variables.push(cont.to_string());
+                                }
+                            } else if first_line.ends_with('\r') {
+                                // Single-line entry with trailing \r: store it as continuation
+                                variables.push("\r".to_string());
+                            }
 
                             let pre_digested = PreDigestedEntry {
                                 timestamp: entry.timestamp,
                                 verbosity_level: entry.verbosity_level,
                                 template_id,
-                                variables: entry.variables,
+                                variables,
                             };
 
                             if res_tx_clone.send((seq, Some(pre_digested))).is_err() {

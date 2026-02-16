@@ -96,7 +96,7 @@ impl LogDecompressor {
                 // Count <VAR>
                 let var_count = template_str.matches("<VAR>").count();
 
-                // Extract variables
+                // Extract variables for <VAR> placeholders
                 let mut current_vars = Vec::new();
                 for _ in 0..var_count {
                     if var_idx < var_col.len() {
@@ -105,7 +105,21 @@ impl LogDecompressor {
                     }
                 }
 
-                // Interpolate
+                // Check for continuation line variable (extra var beyond <VAR> count)
+                // This is stored when a log entry spans multiple lines or has trailing \r
+                let continuation = if var_idx < var_col.len() {
+                    let next_var = &var_col[var_idx];
+                    if next_var.starts_with('\r') || next_var.starts_with('\n') {
+                        var_idx += 1;
+                        Some(next_var.as_str())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Interpolate <VAR> placeholders
                 let mut reconstructed = String::new();
                 let parts: Vec<&str> = template_str.split("<VAR>").collect();
 
@@ -114,6 +128,11 @@ impl LogDecompressor {
                     if j < current_vars.len() {
                         reconstructed.push_str(current_vars[j]);
                     }
+                }
+
+                // Append continuation lines if present
+                if let Some(cont) = continuation {
+                    reconstructed.push_str(cont);
                 }
 
                 // Format Timestamp
@@ -132,9 +151,9 @@ impl LogDecompressor {
                 };
 
                 if lvl_str.is_empty() {
-                    write!(writer, "{} {}", ts_str, reconstructed)?;
+                    writeln!(writer, "{} {}", ts_str, reconstructed)?;
                 } else {
-                    write!(writer, "{} {} {}", ts_str, lvl_str, reconstructed)?;
+                    writeln!(writer, "{} {} {}", ts_str, lvl_str, reconstructed)?;
                 }
             }
         }

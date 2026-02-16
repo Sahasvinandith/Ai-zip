@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 
+use crate::drain_registry::DrainRegistry;
 use crate::models::{CompressedChunk, PreDigestedEntry, RawChunk};
 // use crate::models::{CompressedChunk, LogEntry, LogLevel, PreDigestedEntry, RawChunk};
 // Removed unused imports
@@ -61,7 +62,12 @@ impl LogAccumulator {
     pub fn take_chunk(&mut self) -> RawChunk {
         // Get new templates added since last chunk
         let current_store = self.registry.template_store.read().unwrap();
-        let registry_delta = current_store[self.last_template_count..].to_vec();
+
+        let registry_delta: Vec<String> = current_store[self.last_template_count..]
+            .iter()
+            .map(|(_, tmpl)| tmpl.clone())
+            .collect();
+
         self.last_template_count = current_store.len();
         drop(current_store); // Release lock ASAP
 
@@ -87,66 +93,67 @@ impl LogAccumulator {
     }
 }
 
-// Thread-Safe Registry for Parallel Lookup
+// use crate::models::{CompressedChunk, LogEntry, LogLevel, PreDigestedEntry, RawChunk};
+// Removed unused imports
+
+// 1. Chunk Accumulator (Single Threaded - Fast)
+// ... LogAccumulator logic will be updated shortly ...
+
+// Thread-Safe Registry for KEY (Drain64) -> VALUE (LocalSeq32) mapping
+// This maps the 64-bit template hash from Drain to a sequential 32-bit ID for compression.
 pub struct SharedRegistry {
-    map: RwLock<HashMap<u64, u32>>,
-    template_store: RwLock<Vec<String>>,
+    id_map: RwLock<HashMap<u64, u32>>,
+    template_store: RwLock<Vec<(u64, String)>>, // (Hash, TemplateString)
+    drain: DrainRegistry,
 }
 
 impl SharedRegistry {
     pub fn new() -> Self {
         SharedRegistry {
-            map: RwLock::new(HashMap::new()),
+            id_map: RwLock::new(HashMap::new()),
             template_store: RwLock::new(Vec::new()),
+            drain: DrainRegistry::new(),
         }
     }
 
-    pub fn get_or_register(&self, template_str: String, template_hash: u64) -> u32 {
-        // 1. Optimistic Read
+    /// Gets the template string + ID + Variables for the raw content.
+    /// This performs both "Drain Learning" AND "Registry Lookup/Allocation".
+    pub fn get_or_learn(&self, content: &str) -> (u32, String, Vec<String>) {
+        // 1. Ask Drain for Template + Variables
+        let (drain_hash, template_str, vars) = self.drain.get_or_learn(content);
+
+        // 2. Map Drain Hash (u64) -> Local Sequential ID (u32)
+        // Optimistic Read
         {
-            let map_read = self.map.read().unwrap();
-            if let Some(&id) = map_read.get(&template_hash) {
-                return id;
+            let map_read = self.id_map.read().unwrap();
+            if let Some(&local_id) = map_read.get(&drain_hash) {
+                return (local_id, template_str, vars);
             }
         }
 
-        // 2. Write (Lock Escalation)
-        let mut map_write = self.map.write().unwrap();
+        // Write Lock
+        let mut map_write = self.id_map.write().unwrap();
         let mut store_write = self.template_store.write().unwrap();
 
-        // Double check (another thread might have inserted it)
-        if let Some(&id) = map_write.get(&template_hash) {
-            return id;
+        if let Some(&local_id) = map_write.get(&drain_hash) {
+            return (local_id, template_str, vars);
         }
 
         let new_id = store_write.len() as u32;
-        map_write.insert(template_hash, new_id);
-        store_write.push(template_str);
-        new_id
+        map_write.insert(drain_hash, new_id);
+        store_write.push((drain_hash, template_str.clone()));
+
+        (new_id, template_str, vars)
     }
 
     pub fn dump(&self) -> Vec<(u32, u64, String)> {
         let store = self.template_store.read().unwrap();
-        let map = self.map.read().unwrap();
 
+        // Store has (Hash, Template) at index ID
         let mut result = Vec::with_capacity(store.len());
-
-        // Invert map for display: map is Hash -> ID
-        // unique ID -> Hash (One-to-one mapping in theory, but multiple hashes could map to same ID if collision logic was weird, but here it's 1:1)
-        // Actually, get_or_register: if hash exists -> return ID.
-        // So multiple hashes could point to same ID?
-        // No, map.insert(hash, new_id). New ID is only created if hash NOT in map.
-        // So Hash <-> ID is 1:1.
-
-        // Let's iterate the map to link Hash to ID.
-        for (&hash, &id) in map.iter() {
-            if (id as usize) < store.len() {
-                result.push((id, hash, store[id as usize].clone()));
-            }
+        for (id, (hash, tmpl)) in store.iter().enumerate() {
+            result.push((id as u32, *hash, tmpl.clone()));
         }
-
-        // Sort by ID
-        result.sort_by_key(|k| k.0);
         result
     }
 }

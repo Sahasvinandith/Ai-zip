@@ -21,38 +21,15 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
 
     // Body Extraction
     let match_end = caps.get(0)?.end();
-    let body = &raw_line[match_end..]; // Everything after "YYYY.. LEVEL "
+    let body = raw_line[match_end..].trim_end_matches('\n');
 
-    // Structure Preserving Replacement Logic
-    lazy_static! {
-        static ref VAR_REGEX: Regex = Regex::new(
-            r#"(?x)
-            # 1. Quoted Strings (Single or Double)
-            (['"][^'"]*['"]) |
-            # 2. IP Addresses (IPv4)
-            (\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b) |
-            # 3. File Paths (Must contain /, allowing alphanumeric, dots, hyphens, underscores)
-            ([\w\.\-_]*\/[\w\.\-/_]*) |
-            # 4. Digits (Hex, Decimals, Integers)
-            (\b\w*\d\w*\b)
-            "#
-        )
-        .unwrap();
-    }
+    // DRAIN3 INTEGRATION: Stop regex extraction here.
+    // We return the raw body as the "template_str" for now,
+    // and empty variables. The Sequencer will process this.
 
-    let mut variables = Vec::new();
-
-    // First pass: Collect variables in order
-    for mat in VAR_REGEX.find_iter(body) {
-        variables.push(mat.as_str().to_string());
-    }
-
-    // Second pass: Replace with <VAR>
-    let template_str = VAR_REGEX.replace_all(body, "<VAR>").to_string();
-
-    let mut hasher = DefaultHasher::new();
-    template_str.hash(&mut hasher);
-    let template_hash = hasher.finish();
+    let template_str = body.to_string();
+    let variables = Vec::new();
+    let template_hash = 0; // Placeholder, sequencer will fill.
 
     let component = None;
 
