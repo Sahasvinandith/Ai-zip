@@ -29,7 +29,7 @@ for file in "${files[@]}"; do
     # 1. Compress
     # Outputting time to stderr as per standard `time` behavior
     echo ">> [Compressing]"
-    time cargo run -- compress "$input_file" "$compressed_file"
+    time cargo run -- compress "$input_file" "$compressed_file" --threads 6
     
     # 2. Check Size
     if [ -f "$compressed_file" ]; then
