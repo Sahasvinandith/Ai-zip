@@ -26,7 +26,7 @@ fn main() -> std::io::Result<()> {
             args[0]
         );
         eprintln!(
-            "Modes: \n  compress   - Compress log file to .salc\n  decompress - Decompress .salc file to text"
+            "Modes: \n  compress   - Compress log file to .stz\n  decompress - Decompress .stz file to text"
         );
         std::process::exit(1);
     }

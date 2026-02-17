@@ -1,9 +1,9 @@
-# SALC: Structure-Aware Log Compressor
+# STZ: Semantic Template Zip
 
 ![Rust](https://img.shields.io/badge/built_with-Rust-dca282.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-**SALC** (Project `AI_zip`) is a high-performance log compression tool written in Rust. Unlike general-purpose compressors (like GZIP or ZSTD) that treat data as a raw stream of bytes, SALC understands the *structure* of log files. By separating static log templates from dynamic variables, it achieves superior compression ratios and enables advanced features like search-without-decompression.
+**STZ** (Project `AI_zip`) is a high-performance log compression tool written in Rust. Unlike general-purpose compressors (like GZIP or ZSTD) that treat data as a raw stream of bytes, STZ understands the *semantics* of log files. Using Drain3-based template mining, it separates static log templates from dynamic variables and compresses them independently, achieving superior compression ratios.
 
 ## 🚀 Key Features
 
@@ -11,6 +11,8 @@
 *   **Variable Separation:** Extracts dynamic values (timestamps, IDs, error codes) for specialized compression.
 *   **High Performance:** Built with Rust for safety and speed, utilizing `zstd` for backend block compression.
 *   **CLI Utility:** Simple command-line interface for easy integration into ETL pipelines.
+*   **Delta-Encoded Timestamps:** Adjacent timestamps are stored as compact deltas, further reducing file size.
+*   **Binary Variable Encoding:** Variables use a compact length-prefixed binary format instead of JSON.
 
 ## 🛠️ Installation
 
@@ -29,14 +31,14 @@ The compiled binary will be available at `./target/release/AI_zip`.
 
 ## 📖 Usage
 
-SALC operates in two primary modes: `compress` and `decompress`.
+STZ operates in two primary modes: `compress` and `decompress`.
 
 ### Compressing Logs
 
-To compress a raw log file into the optimized `.salc` format:
+To compress a raw log file into the optimized `.stz` format:
 
 ```bash
-cargo run --release -- compress <input_log_file> <output_file.salc> [OPTIONS]
+cargo run --release -- compress <input_log_file> <output_file.stz> [OPTIONS]
 ```
 
 **Options:**
@@ -46,25 +48,25 @@ cargo run --release -- compress <input_log_file> <output_file.salc> [OPTIONS]
 
 **Example:**
 ```bash
-cargo run --release -- compress system.log compressed.salc --threads 12
+cargo run --release -- compress system.log compressed.stz --threads 12
 ```
 
 ### Decompressing Logs
 
-To restore a `.salc` file back to its original text format:
+To restore a `.stz` file back to its original text format:
 
 ```bash
-cargo run --release -- decompress <input_file.salc> <output_log_file>
+cargo run --release -- decompress <input_file.stz> <output_log_file>
 ```
 
 **Example:**
 ```bash
-cargo run --release -- decompress compressed.salc restored_system.log
+cargo run --release -- decompress compressed.stz restored_system.log
 ```
 
 ## 🧠 How It Works
 
-Standard compressors look for small repeated substrings (LZ77). SALC takes a semantic approach:
+Standard compressors look for small repeated substrings (LZ77). STZ takes a semantic approach:
 
 1.  **Parsing:** Reads the log line and identifies the static structure versus dynamic variables.
 2.  **Tokenization:**

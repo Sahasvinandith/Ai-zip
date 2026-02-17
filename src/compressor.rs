@@ -160,41 +160,49 @@ impl SharedRegistry {
 
 // 2. Compression Logic (Stateless - Parallel)
 pub fn compress_chunk(raw: RawChunk) -> std::io::Result<CompressedChunk> {
-    let mut raw_size = 0;
+    let zstd_level = 3; // Level 3: good balance of speed and ratio
 
     // 1. Registry
     let registry_data = serde_json::to_vec(&raw.registry_delta)?;
-    raw_size += registry_data.len();
-    let registry_blob = zstd::encode_all(&registry_data[..], 0)?;
+    let registry_blob = zstd::encode_all(&registry_data[..], zstd_level)?;
 
-    // 2. Timestamps
+    // 2. Timestamps (Delta-Encoded)
+    // First timestamp is absolute u64, rest are i64 deltas
     let mut ts_bytes = Vec::with_capacity(raw.ts_col.len() * 8);
-    for ts in &raw.ts_col {
-        ts_bytes.extend_from_slice(&ts.to_le_bytes());
+    if let Some(&first) = raw.ts_col.first() {
+        ts_bytes.extend_from_slice(&first.to_le_bytes()); // 8 bytes absolute
+        let mut prev = first;
+        for &ts in &raw.ts_col[1..] {
+            let delta = ts as i64 - prev as i64;
+            ts_bytes.extend_from_slice(&delta.to_le_bytes()); // 8 bytes delta
+            prev = ts;
+        }
     }
-    raw_size += ts_bytes.len();
-    let ts_blob = zstd::encode_all(&ts_bytes[..], 0)?;
+    let ts_blob = zstd::encode_all(&ts_bytes[..], zstd_level)?;
 
     // 3. Levels
-    raw_size += raw.lvl_col.len();
-    let lvl_blob = zstd::encode_all(&raw.lvl_col[..], 0)?;
+    let lvl_blob = zstd::encode_all(&raw.lvl_col[..], zstd_level)?;
 
     // 4. IDs
     let mut id_bytes = Vec::with_capacity(raw.id_col.len() * 4);
     for id in &raw.id_col {
         id_bytes.extend_from_slice(&id.to_le_bytes());
     }
-    raw_size += id_bytes.len();
-    let id_blob = zstd::encode_all(&id_bytes[..], 0)?;
+    let id_blob = zstd::encode_all(&id_bytes[..], zstd_level)?;
 
-    // 5. Variables
-    let var_data = serde_json::to_vec(&raw.var_col)?;
-    raw_size += var_data.len();
-    let var_blob = zstd::encode_all(&var_data[..], 0)?;
+    // 5. Variables (Length-Prefixed Binary)
+    // Format: [u16 len][raw bytes][u16 len][raw bytes]...
+    let mut var_data = Vec::with_capacity(raw.var_col.len() * 20);
+    for var in &raw.var_col {
+        let bytes = var.as_bytes();
+        var_data.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+        var_data.extend_from_slice(bytes);
+    }
+    let var_blob = zstd::encode_all(&var_data[..], zstd_level)?;
 
     Ok(CompressedChunk {
         chunk_id: raw.chunk_id,
-        raw_size_bytes: raw_size,
+        // raw_size_bytes removed
         registry_blob,
         ts_blob,
         lvl_blob,
@@ -214,7 +222,7 @@ impl ChunkWriter {
     pub fn new(filepath: &str) -> std::io::Result<Self> {
         let file = File::create(filepath)?;
         let mut writer = std::io::BufWriter::new(file);
-        writer.write_all(b"SALC")?;
+        writer.write_all(b"STZ1")?;
         Ok(ChunkWriter {
             writer,
             buffer: Vec::with_capacity(20 * 1024 * 1024), // Pre-alloc 20MB

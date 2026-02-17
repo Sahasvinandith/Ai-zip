@@ -90,7 +90,6 @@ pub struct RawChunk {
 #[derive(Debug)]
 pub struct CompressedChunk {
     pub chunk_id: usize,
-    pub raw_size_bytes: usize, // For stats
     pub registry_blob: Vec<u8>,
     pub ts_blob: Vec<u8>,
     pub lvl_blob: Vec<u8>,

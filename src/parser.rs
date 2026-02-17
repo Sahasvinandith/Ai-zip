@@ -1,7 +1,5 @@
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 use crate::models::{LogEntry, LogLevel};
 

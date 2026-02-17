@@ -15,7 +15,7 @@ impl LogDecompressor {
         // 1. Magic Bytes check
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic)?;
-        if &magic != b"SALC" {
+        if &magic != b"STZ1" {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Invalid file format",
@@ -56,10 +56,18 @@ impl LogDecompressor {
             let ts_bytes = read_block(&mut file)?.ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Unexpected EOF in block")
             })?;
+            // Delta-decode timestamps: first is absolute u64, rest are i64 deltas
             let mut ts_col = Vec::new();
-            for chunk in ts_bytes.chunks_exact(8) {
-                let ts = u64::from_le_bytes(chunk.try_into().unwrap());
-                ts_col.push(ts);
+            if ts_bytes.len() >= 8 {
+                let first = u64::from_le_bytes(ts_bytes[..8].try_into().unwrap());
+                ts_col.push(first);
+                let mut prev = first;
+                for chunk in ts_bytes[8..].chunks_exact(8) {
+                    let delta = i64::from_le_bytes(chunk.try_into().unwrap());
+                    let ts = (prev as i64 + delta) as u64;
+                    ts_col.push(ts);
+                    prev = ts;
+                }
             }
 
             // Block 3: Levels
@@ -82,7 +90,19 @@ impl LogDecompressor {
             let var_bytes = read_block(&mut file)?.ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Unexpected EOF in block")
             })?;
-            let var_col: Vec<String> = serde_json::from_slice(&var_bytes)?;
+            // Decode length-prefixed binary variables
+            let mut var_col: Vec<String> = Vec::new();
+            let mut pos = 0;
+            while pos + 2 <= var_bytes.len() {
+                let len = u16::from_le_bytes([var_bytes[pos], var_bytes[pos + 1]]) as usize;
+                pos += 2;
+                if pos + len > var_bytes.len() {
+                    break;
+                }
+                let s = String::from_utf8_lossy(&var_bytes[pos..pos + len]).to_string();
+                pos += len;
+                var_col.push(s);
+            }
 
             // 3. Reconstruction Loop for this Block
             let mut var_idx = 0;

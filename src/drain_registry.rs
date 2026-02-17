@@ -77,6 +77,7 @@ impl DrainRegistry {
         vars
     }
 
+    #[allow(dead_code)]
     pub fn dump(&self) -> std::collections::HashMap<u64, String> {
         let tree = self.tree.read().unwrap();
         let clusters = tree.log_groups();
