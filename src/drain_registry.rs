@@ -10,9 +10,9 @@ pub struct DrainRegistry {
 impl DrainRegistry {
     pub fn new() -> Self {
         let tree = DrainTree::new()
-            .max_depth(4)
+            .max_depth(2)
             .max_children(100)
-            .min_similarity(0.5);
+            .min_similarity(0.4);
 
         DrainRegistry {
             tree: Arc::new(RwLock::new(tree)),
