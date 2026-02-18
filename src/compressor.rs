@@ -15,6 +15,7 @@ pub struct LogAccumulator {
     lvl_col: Vec<u8>,
     id_col: Vec<u32>,
     var_col: Vec<String>,
+    nl_col: Vec<bool>,
     max_lines_per_chunk: usize,
     current_line_count: usize,
     last_template_count: usize, // We need to track registry state
@@ -29,6 +30,7 @@ impl LogAccumulator {
             lvl_col: Vec::new(),
             id_col: Vec::new(),
             var_col: Vec::new(),
+            nl_col: Vec::new(),
             max_lines_per_chunk: 200_000,
             current_line_count: 0,
             last_template_count: 0,
@@ -50,6 +52,9 @@ impl LogAccumulator {
 
         // 4. Handle Variables
         self.var_col.extend(entry.variables);
+
+        // 5. Handle Newline
+        self.nl_col.push(entry.has_newline);
 
         self.current_line_count += 1;
 
@@ -78,6 +83,7 @@ impl LogAccumulator {
             lvl_col: std::mem::take(&mut self.lvl_col),
             id_col: std::mem::take(&mut self.id_col),
             var_col: std::mem::take(&mut self.var_col),
+            nl_col: std::mem::take(&mut self.nl_col),
         };
 
         self.chunk_counter += 1;
@@ -200,14 +206,34 @@ pub fn compress_chunk(raw: RawChunk) -> std::io::Result<CompressedChunk> {
     }
     let var_blob = zstd::encode_all(&var_data[..], zstd_level)?;
 
+    // 6. Newlines (Bitpacked)
+    let mut nl_bytes = Vec::with_capacity((raw.nl_col.len() + 7) / 8);
+    let mut byte: u8 = 0;
+    let mut bit = 0;
+    for &has_nl in &raw.nl_col {
+        if has_nl {
+            byte |= 1 << bit;
+        }
+        bit += 1;
+        if bit == 8 {
+            nl_bytes.push(byte);
+            byte = 0;
+            bit = 0;
+        }
+    }
+    if bit > 0 {
+        nl_bytes.push(byte);
+    }
+    let nl_blob = zstd::encode_all(&nl_bytes[..], zstd_level)?;
+
     Ok(CompressedChunk {
         chunk_id: raw.chunk_id,
-        // raw_size_bytes removed
         registry_blob,
         ts_blob,
         lvl_blob,
         id_blob,
         var_blob,
+        nl_blob,
     })
 }
 
@@ -241,7 +267,9 @@ impl ChunkWriter {
             + 4
             + chunk.id_blob.len()
             + 4
-            + chunk.var_blob.len();
+            + chunk.var_blob.len()
+            + 4
+            + chunk.nl_blob.len();
 
         // Flush if buffer would overflow
         if self.buffer.len() + chunk_size > self.buffer_limit {
@@ -274,6 +302,11 @@ impl ChunkWriter {
         self.buffer
             .extend_from_slice(&u32::to_le_bytes(chunk.var_blob.len() as u32));
         self.buffer.extend_from_slice(&chunk.var_blob);
+
+        // 6. Newlines
+        self.buffer
+            .extend_from_slice(&u32::to_le_bytes(chunk.nl_blob.len() as u32));
+        self.buffer.extend_from_slice(&chunk.nl_blob);
 
         Ok(())
     }

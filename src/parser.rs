@@ -1,8 +1,7 @@
-use chrono::{Datelike, Local};
+use crate::models::{LogEntry, LogLevel};
+use chrono::{Datelike, NaiveDateTime};
 use lazy_static::lazy_static;
 use regex::Regex;
-
-use crate::models::{LogEntry, LogLevel};
 
 pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     lazy_static! {
@@ -32,6 +31,7 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
             template_hash: 0,
             template_str: body.to_string(),
             variables: Vec::new(),
+            has_newline: true,
         });
     }
 
@@ -42,8 +42,8 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
         let app = caps.name("app").unwrap().as_str();
 
         // Inject current year
-        let current_year = Local::now().year();
-        let timestamp = format!("{} {}", current_year, ts_raw); // improved parsing needed eventually
+        let current_year = chrono::Local::now().year();
+        let timestamp = format!("{} {}", current_year, ts_raw);
 
         // Reconstruct body with host/app to preserve them
         let match_end = caps.get(0).unwrap().end();
@@ -57,6 +57,7 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
             template_hash: 0,
             template_str: full_body,
             variables: Vec::new(),
+            has_newline: true,
         });
     }
 
@@ -77,6 +78,7 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
             template_hash: 0,
             template_str: body.to_string(),
             variables: Vec::new(),
+            has_newline: true,
         });
     }
 
@@ -88,5 +90,6 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
         template_hash: 0,
         template_str: raw_line.trim_end_matches('\n').to_string(),
         variables: Vec::new(),
+        has_newline: true,
     })
 }
