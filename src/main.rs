@@ -155,7 +155,7 @@ fn main() -> std::io::Result<()> {
                             let pre_digested = PreDigestedEntry {
                                 timestamp: entry.timestamp,
                                 verbosity_level: entry.verbosity_level,
-                                template_id,
+                                template_id: template_id as u32,
                                 variables,
                             };
 
@@ -221,8 +221,9 @@ fn main() -> std::io::Result<()> {
 
             if debug_mode {
                 // DEBUG PIPELINE: Sequencer -> DebugWriter (Consumer)
-                // No intermediate compression threads.
-                // We reuse the main thread or spawn a thread for writing to keep main for reading.
+                //- [x] Fix `parser.rs` regression (Restore Multi-Format Logic)
+                //- [x] Update `models.rs` Schema (`Option<String>`, `LogLevel::RAW`)
+                //- [x] Fix Compilation Errors (Type Mismatches)in for reading.
 
                 let output_path_clone = output_path.to_string();
                 let registry_clone3 = registry.clone();
@@ -308,12 +309,21 @@ fn main() -> std::io::Result<()> {
             // 6. Reader (Main Thread)
             let input_file = File::open(input_path)?;
             let mut reader = BufReader::new(input_file);
+<<<<<<< HEAD
+=======
+
+>>>>>>> master
             let mut line_buffer = String::new();
             let mut seq_counter = 0;
 
             while reader.read_line(&mut line_buffer)? > 0 {
                 // Treat EVERY line as a potential log entry (or raw line)
+<<<<<<< HEAD
                 let trimmed = line_buffer.trim_end();
+=======
+                // Use trim_end_matches('\n') to prevent removing '\r' (CR) from CRLF files
+                let trimmed = line_buffer.trim_end_matches('\n');
+>>>>>>> master
                 if !trimmed.is_empty() {
                     job_tx
                         .send((seq_counter, trimmed.to_string()))
@@ -323,8 +333,12 @@ fn main() -> std::io::Result<()> {
                 line_buffer.clear();
             }
 
+<<<<<<< HEAD
             // Flush final entry
             // Flush final entry (Handled by loop now)
+=======
+            // Flush final entry - (No buffering, so nothing to flush)
+>>>>>>> master
             drop(job_tx);
 
             // 7. Clean up

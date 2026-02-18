@@ -155,6 +155,9 @@ impl LogDecompressor {
                     reconstructed.push_str(cont);
                 }
 
+                // Restore tabs (unescape workaround)
+                let reconstructed = reconstructed.replace("__TAB__", "\t");
+
                 // Format Timestamp
                 let secs = (ts_col[i] / 1000) as i64;
                 let nsecs = ((ts_col[i] % 1000) * 1_000_000) as u32;
@@ -166,7 +169,10 @@ impl LogDecompressor {
                 let lvl = LogLevel::from_u8(if i < lvl_col.len() { lvl_col[i] } else { 0 });
 
                 if lvl == LogLevel::RAW {
+<<<<<<< HEAD
                     // Raw line: just print content
+=======
+>>>>>>> master
                     writeln!(writer, "{}", reconstructed)?;
                     continue;
                 }
