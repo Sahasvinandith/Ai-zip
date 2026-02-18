@@ -9,6 +9,7 @@ pub enum LogLevel {
     WARN = 4,
     FATAL = 5,
     TRACE = 6,
+    RAW = 255,
     UNKNOWN = 0,
 }
 
@@ -21,6 +22,7 @@ impl LogLevel {
             LogLevel::WARN => 4,
             LogLevel::FATAL => 5,
             LogLevel::TRACE => 6,
+            LogLevel::RAW => 255,
             LogLevel::UNKNOWN => 0,
         }
     }
@@ -33,6 +35,7 @@ impl LogLevel {
             4 => LogLevel::WARN,
             5 => LogLevel::FATAL,
             6 => LogLevel::TRACE,
+            255 => LogLevel::RAW,
             _ => LogLevel::UNKNOWN,
         }
     }
@@ -54,14 +57,15 @@ impl From<&str> for LogLevel {
             "WARN" => LogLevel::WARN,
             "FATAL" => LogLevel::FATAL,
             "TRACE" => LogLevel::TRACE,
+            "RAW" => LogLevel::RAW,
             _ => LogLevel::UNKNOWN,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct LogEntry {
-    pub timestamp: String,
+    pub timestamp: Option<String>,
     pub verbosity_level: LogLevel,
     pub component: Option<String>,
     pub template_hash: u64,
@@ -69,9 +73,9 @@ pub struct LogEntry {
     pub variables: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PreDigestedEntry {
-    pub timestamp: String,
+    pub timestamp: Option<String>,
     pub verbosity_level: LogLevel,
     pub template_id: u32,
     pub variables: Vec<String>,

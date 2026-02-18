@@ -1,50 +1,92 @@
+use chrono::{Datelike, Local};
 use lazy_static::lazy_static;
 use regex::Regex;
 
 use crate::models::{LogEntry, LogLevel};
 
 pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
-    // Step A: Header Parsing
-    // Regex matches: Timestamp (simplified) and Level
     lazy_static! {
-        // Timestamp + Level (greedy whitespace match after level)
-        // Use [ \t] to avoid matching newlines/CRs
-        static ref HEADER_RE: Regex = Regex::new(r"^(?P<ts>[\d\-]+\s[\d:,]+)\s+(?P<lvl>\w+)[ \t]").unwrap();
+        // HADOOP: 2015-08-21 11:16:10,187 INFO ...
+        static ref RE_HADOOP: Regex = Regex::new(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+(?P<lvl>\w+)\s").unwrap();
+
+        // SYSLOG: Aug 21 11:16:10 HOST APP: ...
+        static ref RE_SYSLOG: Regex = Regex::new(r"^(?P<ts>[A-Z][a-z]{2}\s+\d{1,2}\s\d{2}:\d{2}:\d{2})\s+(?P<host>[\w\.\-]+)\s+(?P<app>[\w\.\-]+):\s").unwrap();
+
+        // NOVA: 2015-08-21 11:16:10.187 PID LEVEL ...
+        static ref RE_NOVA: Regex = Regex::new(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+(?P<pid>\d+)\s+(?P<lvl>\w+)\s").unwrap();
     }
 
-    let caps = HEADER_RE.captures(raw_line)?;
-    let timestamp = caps.name("ts")?.as_str().to_string();
-    let level_str = caps.name("lvl")?.as_str();
-    let verbosity_level = LogLevel::from(level_str);
+    // 1. Try HADOOP
+    if let Some(caps) = RE_HADOOP.captures(raw_line) {
+        let timestamp = caps.name("ts").unwrap().as_str().to_string();
+        let level_str = caps.name("lvl").unwrap().as_str();
+        let verbosity_level = LogLevel::from(level_str);
 
-    // Body Extraction
-    let match_end = caps.get(0)?.end();
-    let body = raw_line[match_end..].trim_end_matches('\n');
+        let match_end = caps.get(0).unwrap().end();
+        let body = raw_line[match_end..].trim_end_matches('\n');
 
-    // DRAIN3 INTEGRATION: Stop regex extraction here.
-    // We return the raw body as the "template_str" for now,
-    // and empty variables. The Sequencer will process this.
+        return Some(LogEntry {
+            timestamp: Some(timestamp),
+            verbosity_level,
+            component: None,
+            template_hash: 0,
+            template_str: body.to_string(),
+            variables: Vec::new(),
+        });
+    }
 
-    let template_str = body.to_string();
-    let variables = Vec::new();
-    let template_hash = 0; // Placeholder, sequencer will fill.
+    // 2. Try SYSLOG
+    if let Some(caps) = RE_SYSLOG.captures(raw_line) {
+        let ts_raw = caps.name("ts").unwrap().as_str();
+        let host = caps.name("host").unwrap().as_str();
+        let app = caps.name("app").unwrap().as_str();
 
-    let component = None;
+        // Inject current year
+        let current_year = Local::now().year();
+        let timestamp = format!("{} {}", current_year, ts_raw); // improved parsing needed eventually
 
+        // Reconstruct body with host/app to preserve them
+        let match_end = caps.get(0).unwrap().end();
+        let msg_body = raw_line[match_end..].trim_end_matches('\n');
+        let full_body = format!("{} {}: {}", host, app, msg_body);
+
+        return Some(LogEntry {
+            timestamp: Some(timestamp),
+            verbosity_level: LogLevel::INFO, // Syslog implies INFO usually
+            component: None,
+            template_hash: 0,
+            template_str: full_body,
+            variables: Vec::new(),
+        });
+    }
+
+    // 3. Try NOVA
+    if let Some(caps) = RE_NOVA.captures(raw_line) {
+        let ts_raw = caps.name("ts").unwrap().as_str();
+        let timestamp = ts_raw.replace('.', ","); // Normalize to HADOOP format
+        let level_str = caps.name("lvl").unwrap().as_str();
+        let verbosity_level = LogLevel::from(level_str);
+
+        let match_end = caps.get(0).unwrap().end();
+        let body = raw_line[match_end..].trim_end_matches('\n');
+
+        return Some(LogEntry {
+            timestamp: Some(timestamp),
+            verbosity_level,
+            component: None,
+            template_hash: 0,
+            template_str: body.to_string(),
+            variables: Vec::new(),
+        });
+    }
+
+    // 4. Fallback: RAW (Stack traces, etc)
     Some(LogEntry {
-        timestamp,
-        verbosity_level,
-        component,
-        template_hash,
-        template_str,
-        variables,
+        timestamp: None,
+        verbosity_level: LogLevel::RAW,
+        component: None,
+        template_hash: 0,
+        template_str: raw_line.trim_end_matches('\n').to_string(),
+        variables: Vec::new(),
     })
-}
-
-// Function to check if a line is a start of a new log entry
-pub fn is_log_start(line: &str) -> bool {
-    lazy_static! {
-        static ref START_RE: Regex = Regex::new(r"^\d{4}-\d{2}-\d{2}").unwrap();
-    }
-    START_RE.is_match(line)
 }

@@ -5,3 +5,4 @@ Cargo.lock
 *.salc
 Big_logs
 checks
+*.stz

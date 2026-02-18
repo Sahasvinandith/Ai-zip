@@ -16,7 +16,7 @@ use compressor::{ChunkWriter, LogAccumulator, SharedRegistry, compress_chunk};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use decompressor::LogDecompressor;
 use models::{CompressedChunk, PreDigestedEntry, RawChunk};
-use parser::{is_log_start, parse_line};
+use parser::parse_line;
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -155,7 +155,7 @@ fn main() -> std::io::Result<()> {
                             let pre_digested = PreDigestedEntry {
                                 timestamp: entry.timestamp,
                                 verbosity_level: entry.verbosity_level,
-                                template_id,
+                                template_id: template_id as u32,
                                 variables,
                             };
 
@@ -211,8 +211,9 @@ fn main() -> std::io::Result<()> {
 
             if debug_mode {
                 // DEBUG PIPELINE: Sequencer -> DebugWriter (Consumer)
-                // No intermediate compression threads.
-                // We reuse the main thread or spawn a thread for writing to keep main for reading.
+                //- [x] Fix `parser.rs` regression (Restore Multi-Format Logic)
+                //- [x] Update `models.rs` Schema (`Option<String>`, `LogLevel::RAW`)
+                //- [x] Fix Compilation Errors (Type Mismatches)in for reading.
 
                 let output_path_clone = output_path.to_string();
                 let registry_clone3 = registry.clone();
@@ -298,31 +299,24 @@ fn main() -> std::io::Result<()> {
             // 6. Reader (Main Thread)
             let input_file = File::open(input_path)?;
             let mut reader = BufReader::new(input_file);
-            let mut current_entry_lines = String::new();
+
             let mut line_buffer = String::new();
             let mut seq_counter = 0;
 
             while reader.read_line(&mut line_buffer)? > 0 {
-                if is_log_start(&line_buffer) {
-                    if !current_entry_lines.is_empty() {
-                        job_tx
-                            .send((seq_counter, current_entry_lines.clone()))
-                            .expect("Workers died");
-                        seq_counter += 1;
-                    }
-                    current_entry_lines = line_buffer.clone();
-                } else {
-                    current_entry_lines.push_str(&line_buffer);
+                // Treat EVERY line as a potential log entry (or raw line)
+                // Use trim_end_matches('\n') to prevent removing '\r' (CR) from CRLF files
+                let trimmed = line_buffer.trim_end_matches('\n');
+                if !trimmed.is_empty() {
+                    job_tx
+                        .send((seq_counter, trimmed.to_string()))
+                        .expect("Workers died");
+                    seq_counter += 1;
                 }
                 line_buffer.clear();
             }
 
-            // Flush final entry
-            if !current_entry_lines.is_empty() {
-                job_tx
-                    .send((seq_counter, current_entry_lines))
-                    .expect("Workers died");
-            }
+            // Flush final entry - (No buffering, so nothing to flush)
             drop(job_tx);
 
             // 7. Clean up

@@ -32,16 +32,19 @@ impl DrainRegistry {
     pub fn get_or_learn(&self, content: &str) -> (u64, String, Vec<String>) {
         let mut tree = self.tree.write().unwrap();
 
-        let cluster_str = if let Some(cluster) = tree.add_log_line(content) {
+        // Workaround: Escape tabs to prevent Drain from stripping them as whitespace
+        let content_escaped = content.replace('\t', "__TAB__");
+
+        let cluster_str = if let Some(cluster) = tree.add_log_line(&content_escaped) {
             cluster.as_string()
         } else {
             // Fallback: treat entire content as the template (no variables)
-            content.to_string()
+            content_escaped.to_string()
         };
 
         drop(tree); // release lock before extraction work
 
-        let vars = self.extract_variables(content, &cluster_str);
+        let vars = self.extract_variables(&content_escaped, &cluster_str);
 
         // Convert Drain's <*> to <VAR> for decompressor compatibility
         let template_with_var = cluster_str.replace("<*>", "<VAR>");
