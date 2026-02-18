@@ -39,7 +39,11 @@ impl LogAccumulator {
 
     pub fn ingest(&mut self, entry: PreDigestedEntry) -> Option<RawChunk> {
         // 1. Handle Timestamp
-        let ts_millis = parse_timestamp_millis(&entry.timestamp);
+        let ts_str = entry
+            .timestamp
+            .as_deref()
+            .unwrap_or("1970-01-01 00:00:00,000");
+        let ts_millis = parse_timestamp_millis(ts_str);
         self.ts_col.push(ts_millis);
 
         // 2. Handle Level

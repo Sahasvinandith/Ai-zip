@@ -164,6 +164,13 @@ impl LogDecompressor {
 
                 // Restore Level
                 let lvl = LogLevel::from_u8(if i < lvl_col.len() { lvl_col[i] } else { 0 });
+
+                if lvl == LogLevel::RAW {
+                    // Raw line: just print content
+                    writeln!(writer, "{}", reconstructed)?;
+                    continue;
+                }
+
                 let lvl_str = if lvl == LogLevel::UNKNOWN {
                     String::new()
                 } else {

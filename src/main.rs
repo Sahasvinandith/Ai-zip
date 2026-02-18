@@ -16,7 +16,7 @@ use compressor::{ChunkWriter, LogAccumulator, SharedRegistry, compress_chunk};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use decompressor::LogDecompressor;
 use models::{CompressedChunk, PreDigestedEntry, RawChunk};
-use parser::{is_log_start, parse_line};
+use parser::parse_line;
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -181,12 +181,22 @@ fn main() -> std::io::Result<()> {
                 let mut next_expected_seq = 0;
                 let mut count = 0;
 
+                // Sequencer state for timestamp backfilling
+                let mut last_valid_timestamp = String::from("1970-01-01 00:00:00,000");
+
                 for (seq, entry) in res_rx {
                     buffer.insert(seq, entry);
 
                     // Drain buffer in order
                     while let Some(item) = buffer.remove(&next_expected_seq) {
-                        if let Some(valid_entry) = item {
+                        if let Some(mut valid_entry) = item {
+                            // Backfill timestamp if missing (Stack traces / Raw lines)
+                            if let Some(ts) = &valid_entry.timestamp {
+                                last_valid_timestamp = ts.clone();
+                            } else {
+                                valid_entry.timestamp = Some(last_valid_timestamp.clone());
+                            }
+
                             if let Some(chunk) = accumulator.ingest(valid_entry) {
                                 raw_chunk_tx.send(chunk).expect("Downstream died");
                             }
@@ -298,31 +308,23 @@ fn main() -> std::io::Result<()> {
             // 6. Reader (Main Thread)
             let input_file = File::open(input_path)?;
             let mut reader = BufReader::new(input_file);
-            let mut current_entry_lines = String::new();
             let mut line_buffer = String::new();
             let mut seq_counter = 0;
 
             while reader.read_line(&mut line_buffer)? > 0 {
-                if is_log_start(&line_buffer) {
-                    if !current_entry_lines.is_empty() {
-                        job_tx
-                            .send((seq_counter, current_entry_lines.clone()))
-                            .expect("Workers died");
-                        seq_counter += 1;
-                    }
-                    current_entry_lines = line_buffer.clone();
-                } else {
-                    current_entry_lines.push_str(&line_buffer);
+                // Treat EVERY line as a potential log entry (or raw line)
+                let trimmed = line_buffer.trim_end();
+                if !trimmed.is_empty() {
+                    job_tx
+                        .send((seq_counter, trimmed.to_string()))
+                        .expect("Workers died");
+                    seq_counter += 1;
                 }
                 line_buffer.clear();
             }
 
             // Flush final entry
-            if !current_entry_lines.is_empty() {
-                job_tx
-                    .send((seq_counter, current_entry_lines))
-                    .expect("Workers died");
-            }
+            // Flush final entry (Handled by loop now)
             drop(job_tx);
 
             // 7. Clean up
