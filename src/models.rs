@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, PartialEq, Clone, Serialize)]
@@ -75,6 +75,7 @@ pub struct LogEntry {
     pub template_hash: u64,
     pub template_str: String,
     pub variables: Vec<String>,
+    pub has_newline: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +84,7 @@ pub struct PreDigestedEntry {
     pub verbosity_level: LogLevel,
     pub template_id: u32,
     pub variables: Vec<String>,
+    pub has_newline: bool,
 }
 
 #[derive(Debug)]
@@ -93,9 +95,10 @@ pub struct RawChunk {
     pub lvl_col: Vec<u8>,
     pub id_col: Vec<u32>,
     pub var_col: Vec<String>,
+    pub nl_col: Vec<bool>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CompressedChunk {
     pub chunk_id: usize,
     pub registry_blob: Vec<u8>,
@@ -103,4 +106,5 @@ pub struct CompressedChunk {
     pub lvl_blob: Vec<u8>,
     pub id_blob: Vec<u8>,
     pub var_blob: Vec<u8>,
+    pub nl_blob: Vec<u8>,
 }

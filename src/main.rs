@@ -76,8 +76,10 @@ fn main() -> std::io::Result<()> {
 
             // 1. Setup Channels
             // Parse Pipeline: Job -> Result (PreDigestedEntry)
-            let (job_tx, job_rx): (Sender<(usize, String)>, Receiver<(usize, String)>) =
-                bounded(100000);
+            let (job_tx, job_rx): (
+                Sender<(usize, String, bool)>,
+                Receiver<(usize, String, bool)>,
+            ) = bounded(100000);
             let (res_tx, res_rx): (
                 Sender<(usize, Option<PreDigestedEntry>)>,
                 Receiver<(usize, Option<PreDigestedEntry>)>,
@@ -117,8 +119,9 @@ fn main() -> std::io::Result<()> {
                 let registry_clone = registry.clone(); // Shared Registry
 
                 worker_handles.push(thread::spawn(move || {
-                    for (seq, line) in job_rx_clone {
-                        if let Some(entry) = parse_line(&line) {
+                    for (seq, line, has_newline) in job_rx_clone {
+                        if let Some(mut entry) = parse_line(&line) {
+                            entry.has_newline = has_newline;
                             // Handle multi-line entries: only send first line to Drain,
                             // preserve continuation lines as raw content.
                             let (first_line, continuation) = match entry.template_str.find('\n') {
@@ -157,6 +160,7 @@ fn main() -> std::io::Result<()> {
                                 verbosity_level: entry.verbosity_level,
                                 template_id: template_id as u32,
                                 variables,
+                                has_newline: entry.has_newline,
                             };
 
                             if res_tx_clone.send((seq, Some(pre_digested))).is_err() {
@@ -319,14 +323,18 @@ fn main() -> std::io::Result<()> {
             while reader.read_line(&mut line_buffer)? > 0 {
                 // Treat EVERY line as a potential log entry (or raw line)
 <<<<<<< HEAD
+<<<<<<< HEAD
                 let trimmed = line_buffer.trim_end();
 =======
+=======
+                let has_newline = line_buffer.ends_with('\n');
+>>>>>>> master
                 // Use trim_end_matches('\n') to prevent removing '\r' (CR) from CRLF files
                 let trimmed = line_buffer.trim_end_matches('\n');
 >>>>>>> master
                 if !trimmed.is_empty() {
                     job_tx
-                        .send((seq_counter, trimmed.to_string()))
+                        .send((seq_counter, trimmed.to_string(), has_newline))
                         .expect("Workers died");
                     seq_counter += 1;
                 }

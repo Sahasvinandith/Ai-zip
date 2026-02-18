@@ -104,6 +104,17 @@ impl LogDecompressor {
                 var_col.push(s);
             }
 
+            // Block 6: Newlines
+            let nl_bytes = read_block(&mut file)?.ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Unexpected EOF in block")
+            })?;
+            let mut nl_col = Vec::with_capacity(id_col.len());
+            for byte in nl_bytes {
+                for bit in 0..8 {
+                    nl_col.push((byte >> bit) & 1 == 1);
+                }
+            }
+
             // 3. Reconstruction Loop for this Block
             let mut var_idx = 0;
             for i in 0..id_col.len() {
@@ -155,7 +166,6 @@ impl LogDecompressor {
                     reconstructed.push_str(cont);
                 }
 
-                // Restore tabs (unescape workaround)
                 let reconstructed = reconstructed.replace("__TAB__", "\t");
 
                 // Format Timestamp
@@ -170,10 +180,19 @@ impl LogDecompressor {
 
                 if lvl == LogLevel::RAW {
 <<<<<<< HEAD
+<<<<<<< HEAD
                     // Raw line: just print content
 =======
 >>>>>>> master
                     writeln!(writer, "{}", reconstructed)?;
+=======
+                    let msg = reconstructed.replace("__TAB__", "\t");
+                    if i < nl_col.len() && !nl_col[i] {
+                        write!(writer, "{}", msg)?;
+                    } else {
+                        writeln!(writer, "{}", msg)?;
+                    }
+>>>>>>> master
                     continue;
                 }
 
