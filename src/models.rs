@@ -67,10 +67,10 @@ impl From<&str> for LogLevel {
 pub struct LogEntry {
     pub timestamp: Option<String>,
     pub verbosity_level: LogLevel,
-    pub component: Option<String>,
-    pub template_hash: u64,
+    // pub component: Option<String>,
+    // pub template_hash: u64,
     pub template_str: String,
-    pub variables: Vec<String>,
+    // pub variables: Vec<String>,
     pub has_newline: bool,
 }
 
