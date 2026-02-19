@@ -59,21 +59,46 @@ impl DrainRegistry {
         hasher.finish()
     }
 
-    /// Extract variables by comparing content tokens against template tokens.
-    /// Any token in the template that is `<*>` indicates the corresponding
-    /// content token is a variable.
+    /// Extract variables by scanning the content against the template's literal segments.
+    /// This handles cases where variables are embedded within tokens (e.g. "user=<*>").
     fn extract_variables(&self, content: &str, template: &str) -> Vec<String> {
-        let content_tokens: Vec<&str> = content.split_whitespace().collect();
-        let template_tokens: Vec<&str> = template.split_whitespace().collect();
-
         let mut vars = Vec::new();
+        let mut current_pos = 0;
 
-        for (i, t_token) in template_tokens.iter().enumerate() {
-            if i >= content_tokens.len() {
-                break;
+        // The template is a sequence of: [Literal] <V> [Literal] <V> ...
+        // We split by placeholders to get the literals.
+        let parts: Vec<&str> = template.split("<*>").collect();
+        let last_idx = parts.len().saturating_sub(1);
+
+        for (i, part) in parts.iter().enumerate() {
+            // Special handling for the last part if it is empty:
+            // This implies the template ends with <*>, so the last variable
+            // is "everything else".
+            if i == last_idx && part.is_empty() {
+                if template.ends_with("<*>") {
+                    let var_str = &content[current_pos..];
+                    vars.push(var_str.to_string());
+                    break;
+                }
             }
-            if *t_token == "<*>" {
-                vars.push(content_tokens[i].to_string());
+
+            if let Some(found_idx) = content[current_pos..].find(part) {
+                let absolute_idx = current_pos + found_idx;
+
+                // If this is NOT the first part, everything between current_pos
+                // and where we found this part is a variable.
+                if i > 0 {
+                    let var_str = &content[current_pos..absolute_idx];
+                    vars.push(var_str.to_string());
+                }
+
+                // Advance position past this literal part
+                current_pos = absolute_idx + part.len();
+            } else {
+                // If a literal part of the template is not found in content,
+                // something is wrong (shouldn't happen if this content *generated* the template).
+                // But if it does, we can't extract safely.
+                return vars;
             }
         }
 

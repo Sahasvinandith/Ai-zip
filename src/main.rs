@@ -309,8 +309,19 @@ fn main() -> std::io::Result<()> {
 
             while reader.read_until(b'\n', &mut line_buffer)? > 0 {
                 // Treat EVERY line as a potential log entry (or raw line)
-                // Convert bytes to string, replacing invalid UTF-8 with U+FFFD REPLACEMENT CHARACTER
-                let line_cow = String::from_utf8_lossy(&line_buffer);
+                // Convert bytes to string, escaping invalid UTF-8 bytes to preserve them
+                let mut line_string = String::with_capacity(line_buffer.len());
+                for chunk in line_buffer.utf8_chunks() {
+                    line_string.push_str(chunk.valid());
+                    if !chunk.invalid().is_empty() {
+                        for &b in chunk.invalid() {
+                            use std::fmt::Write;
+                            write!(line_string, "__BYTE_{:02X}__", b).unwrap();
+                        }
+                    }
+                }
+
+                let line_cow: std::borrow::Cow<'_, str> = std::borrow::Cow::Owned(line_string);
 
                 let has_newline = line_cow.ends_with('\n');
                 // Use trim_end_matches('\n') to prevent removing '\r' (CR) from CRLF files

@@ -36,6 +36,9 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     }
 
     // 2. Try SYSLOG
+    // DISABLED: This destructive parsing alters timestamps and inserts "INFO", causing fidelity loss.
+    // Falls back to RAW mode for perfect preservation.
+    /*
     if let Some(caps) = RE_SYSLOG.captures(raw_line) {
         let ts_raw = caps.name("ts").unwrap().as_str();
         let host = caps.name("host").unwrap().as_str();
@@ -60,6 +63,7 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
             has_newline: true,
         });
     }
+    */
 
     // 3. Try NOVA
     if let Some(caps) = RE_NOVA.captures(raw_line) {

@@ -178,31 +178,72 @@ impl LogDecompressor {
                 // Restore Level
                 let lvl = LogLevel::from_u8(if i < lvl_col.len() { lvl_col[i] } else { 0 });
 
-                if lvl == LogLevel::RAW {
+                let final_str = if lvl == LogLevel::RAW {
                     let msg = reconstructed.replace("__TAB__", "\t");
-                    if i < nl_col.len() && !nl_col[i] {
-                        write!(writer, "{}", msg)?;
-                    } else {
-                        writeln!(writer, "{}", msg)?;
-                    }
-                    continue;
-                }
-
-                let lvl_str = if lvl == LogLevel::UNKNOWN {
-                    String::new()
+                    msg
                 } else {
-                    lvl.to_string()
+                    let lvl_str = if lvl == LogLevel::UNKNOWN {
+                        String::new()
+                    } else {
+                        lvl.to_string()
+                    };
+
+                    if lvl_str.is_empty() {
+                        format!("{} {}", ts_str, reconstructed)
+                    } else {
+                        format!("{} {} {}", ts_str, lvl_str, reconstructed)
+                    }
                 };
 
-                if lvl_str.is_empty() {
-                    writeln!(writer, "{} {}", ts_str, reconstructed)?;
+                // Write with decoding
+                Self::write_decoded(&mut writer, &final_str)?;
+
+                // Handle newline
+                if i < nl_col.len() && !nl_col[i] {
+                    // No newline
                 } else {
-                    writeln!(writer, "{} {} {}", ts_str, lvl_str, reconstructed)?;
+                    writer.write_all(b"\n")?;
                 }
             }
         }
 
         writer.flush()?;
+        Ok(())
+    }
+
+    fn write_decoded<W: Write>(writer: &mut W, s: &str) -> std::io::Result<()> {
+        let mut last_pos = 0;
+        // Find potential escape sequences "__BYTE_XX__"
+        // Length of sequence is 11 chars.
+        // We can scan manually.
+
+        // Simple scan loop
+        let mut chars = s.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if c == '_' && s[i..].starts_with("__BYTE_") {
+                // Check if we have enough chars left
+                if i + 11 <= s.len() && &s[i + 9..i + 11] == "__" {
+                    // Try parse hex
+                    if let Ok(byte) = u8::from_str_radix(&s[i + 7..i + 9], 16) {
+                        // Flush previous
+                        writer.write_all(s[last_pos..i].as_bytes())?;
+                        // Write byte
+                        writer.write_all(&[byte])?;
+
+                        // Skip
+                        for _ in 0..10 {
+                            chars.next();
+                        } // skip _BYTE_XX__ (10 chars after first _)
+                        last_pos = i + 11;
+                    }
+                }
+            }
+        }
+
+        // Write remainder
+        if last_pos < s.len() {
+            writer.write_all(s[last_pos..].as_bytes())?;
+        }
         Ok(())
     }
 }
