@@ -78,10 +78,7 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
         return Some(LogEntry {
             timestamp: Some(timestamp),
             verbosity_level,
-            // component: None,
-            // template_hash: 0,
             template_str: body.to_string(),
-            // variables: Vec::new(),
             has_newline: true,
         });
     }
@@ -90,10 +87,7 @@ pub fn parse_line(raw_line: &str) -> Option<LogEntry> {
     Some(LogEntry {
         timestamp: None,
         verbosity_level: LogLevel::RAW,
-        // component: None,
-        // template_hash: 0,
         template_str: raw_line.trim_end_matches('\n').to_string(),
-        // variables: Vec::new(),
         has_newline: true,
     })
 }
