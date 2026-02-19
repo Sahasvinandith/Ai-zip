@@ -22,40 +22,60 @@ impl LogDecompressor {
             ));
         }
 
+        Self::decompress_to_writer(&mut file, &mut writer)
+    }
+
+    pub fn decompress_to_writer<R: Read, W: Write>(
+        reader: &mut R,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
         let mut template_store: Vec<String> = Vec::new();
 
         // Loop until EOF
         loop {
             // Helper to read compressed block
             // Returns Ok(Some(data)) if successful, Ok(None) if EOF on size read
-            let read_block = |f: &mut File| -> std::io::Result<Option<Vec<u8>>> {
-                let mut size_buf = [0u8; 4];
-                match f.read_exact(&mut size_buf) {
-                    Ok(_) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                    Err(e) => return Err(e),
-                }
+            // We need to define this closure inside, but it captures nothing from env except reader.
 
-                let size = u32::from_le_bytes(size_buf) as usize;
-                let mut compressed_data = vec![0u8; size];
-                f.read_exact(&mut compressed_data)?;
-                let decoded = zstd::decode_all(&compressed_data[..])?;
-                Ok(Some(decoded))
-            };
+            // Refactored read_block to be inline or helper function that takes reader?
+            // Closure is fine.
 
-            // 2. Deserialize Blocks
-            // Block 1: Registry Delta
-            let registry_bytes = match read_block(&mut file)? {
-                Some(b) => b,
-                None => break, // EOF reached cleanly between blocks
-            };
+            let mut size_buf = [0u8; 4];
+            let size_read = reader.read(&mut size_buf)?;
+            if size_read == 0 {
+                break; // EOF
+            }
+            if size_read < 4 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Incomplete block size",
+                ));
+            }
+
+            let size = u32::from_le_bytes(size_buf) as usize;
+            let mut compressed_data = vec![0u8; size];
+            reader.read_exact(&mut compressed_data)?;
+            let decoded = zstd::decode_all(&compressed_data[..])?;
+
+            // Block 1: Registry Delta (Decoded above)
+            let registry_bytes = decoded;
+
             let new_templates: Vec<String> = serde_json::from_slice(&registry_bytes)?;
             template_store.extend(new_templates);
 
+            // Helper for remaining blocks
+            let read_next_block = |r: &mut R| -> std::io::Result<Vec<u8>> {
+                let mut sz_buf = [0u8; 4];
+                r.read_exact(&mut sz_buf)?;
+                let sz = u32::from_le_bytes(sz_buf) as usize;
+                let mut data = vec![0u8; sz];
+                r.read_exact(&mut data)?;
+                let dec = zstd::decode_all(&data[..])?;
+                Ok(dec)
+            };
+
             // Block 2: Timestamps
-            let ts_bytes = read_block(&mut file)?.ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Unexpected EOF in block")
-            })?;
+            let ts_bytes = read_next_block(reader)?;
             // Delta-decode timestamps: first is absolute u64, rest are i64 deltas
             let mut ts_col = Vec::new();
             if ts_bytes.len() >= 8 {
@@ -71,15 +91,11 @@ impl LogDecompressor {
             }
 
             // Block 3: Levels
-            let lvl_bytes = read_block(&mut file)?.ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Unexpected EOF in block")
-            })?;
+            let lvl_bytes = read_next_block(reader)?;
             let lvl_col: Vec<u8> = lvl_bytes;
 
             // Block 4: IDs
-            let id_bytes = read_block(&mut file)?.ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Unexpected EOF in block")
-            })?;
+            let id_bytes = read_next_block(reader)?;
             let mut id_col = Vec::new();
             for chunk in id_bytes.chunks_exact(4) {
                 let id = u32::from_le_bytes(chunk.try_into().unwrap());
@@ -87,9 +103,7 @@ impl LogDecompressor {
             }
 
             // Block 5: Variables
-            let var_bytes = read_block(&mut file)?.ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Unexpected EOF in block")
-            })?;
+            let var_bytes = read_next_block(reader)?;
             // Decode length-prefixed binary variables
             let mut var_col: Vec<String> = Vec::new();
             let mut pos = 0;
@@ -105,9 +119,7 @@ impl LogDecompressor {
             }
 
             // Block 6: Newlines
-            let nl_bytes = read_block(&mut file)?.ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Unexpected EOF in block")
-            })?;
+            let nl_bytes = read_next_block(reader)?;
             let mut nl_col = Vec::with_capacity(id_col.len());
             for byte in nl_bytes {
                 for bit in 0..8 {
@@ -196,7 +208,7 @@ impl LogDecompressor {
                 };
 
                 // Write with decoding
-                Self::write_decoded(&mut writer, &final_str)?;
+                Self::write_decoded(writer, &final_str)?;
 
                 // Handle newline
                 if i < nl_col.len() && !nl_col[i] {
