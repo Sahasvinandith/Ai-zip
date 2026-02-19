@@ -325,13 +325,19 @@ fn main() -> std::io::Result<()> {
 
                 let has_newline = line_cow.ends_with('\n');
                 // Use trim_end_matches('\n') to prevent removing '\r' (CR) from CRLF files
-                let trimmed = line_cow.trim_end_matches('\n');
-                if !trimmed.is_empty() {
-                    job_tx
-                        .send((seq_counter, trimmed.to_string(), has_newline))
-                        .expect("Workers died");
-                    seq_counter += 1;
-                }
+                // let trimmed = line_cow.trim_end_matches('\n');
+                let trimmed = if has_newline {
+                    &line_cow[..line_cow.len() - 1]
+                } else {
+                    &line_cow
+                };
+
+                // if !trimmed.is_empty() { // CAUSE OF BUG: explicitly skipped empty lines
+                job_tx
+                    .send((seq_counter, trimmed.to_string(), has_newline))
+                    .expect("Workers died");
+                seq_counter += 1;
+                // }
                 line_buffer.clear();
             }
 
