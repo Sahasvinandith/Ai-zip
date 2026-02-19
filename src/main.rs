@@ -304,14 +304,17 @@ fn main() -> std::io::Result<()> {
             let input_file = File::open(input_path)?;
             let mut reader = BufReader::new(input_file);
 
-            let mut line_buffer = String::new();
+            let mut line_buffer = Vec::new();
             let mut seq_counter = 0;
 
-            while reader.read_line(&mut line_buffer)? > 0 {
+            while reader.read_until(b'\n', &mut line_buffer)? > 0 {
                 // Treat EVERY line as a potential log entry (or raw line)
-                let has_newline = line_buffer.ends_with('\n');
+                // Convert bytes to string, replacing invalid UTF-8 with U+FFFD REPLACEMENT CHARACTER
+                let line_cow = String::from_utf8_lossy(&line_buffer);
+
+                let has_newline = line_cow.ends_with('\n');
                 // Use trim_end_matches('\n') to prevent removing '\r' (CR) from CRLF files
-                let trimmed = line_buffer.trim_end_matches('\n');
+                let trimmed = line_cow.trim_end_matches('\n');
                 if !trimmed.is_empty() {
                     job_tx
                         .send((seq_counter, trimmed.to_string(), has_newline))
