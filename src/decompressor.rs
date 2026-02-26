@@ -22,15 +22,15 @@ impl LogDecompressor {
             ));
         }
 
-        Self::decompress_to_writer(&mut file, &mut writer)
+        let mut template_store: Vec<String> = Vec::new();
+        Self::decompress_to_writer(&mut file, &mut writer, &mut template_store)
     }
 
     pub fn decompress_to_writer<R: Read, W: Write>(
         reader: &mut R,
         writer: &mut W,
+        template_store: &mut Vec<String>,
     ) -> std::io::Result<()> {
-        let mut template_store: Vec<String> = Vec::new();
-
         // Loop until EOF
         loop {
             // Helper to read compressed block
@@ -92,7 +92,7 @@ impl LogDecompressor {
 
             // Block 3: Levels
             let lvl_bytes = read_next_block(reader)?;
-            let lvl_col: Vec<u8> = lvl_bytes;
+            let lvl_col: Vec<u8> = lvl_bytes.clone();
 
             // Block 4: IDs
             let id_bytes = read_next_block(reader)?;
@@ -120,8 +120,9 @@ impl LogDecompressor {
 
             // Block 6: Newlines
             let nl_bytes = read_next_block(reader)?;
+
             let mut nl_col = Vec::with_capacity(id_col.len());
-            for byte in nl_bytes {
+            for byte in &nl_bytes {
                 for bit in 0..8 {
                     nl_col.push((byte >> bit) & 1 == 1);
                 }
@@ -162,9 +163,9 @@ impl LogDecompressor {
                     None
                 };
 
-                // Interpolate <VAR> placeholders
                 let mut reconstructed = String::new();
                 let parts: Vec<&str> = template_str.split("<VAR>").collect();
+                // println!("Decompressing ID: {}, template: {}, vars: {:?}", id, template_str, current_vars);
 
                 for (j, part) in parts.iter().enumerate() {
                     reconstructed.push_str(part);

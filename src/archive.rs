@@ -2,7 +2,8 @@ use crate::compressor;
 use crate::decompressor;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 const STZ_ARCHIVE_MAGIC: &[u8] = b"STZ\x02";
@@ -16,6 +17,7 @@ pub fn create_archive(
     out_file.write_all(STZ_ARCHIVE_MAGIC)?;
 
     let root_path = Path::new(input_root);
+    let global_registry = Arc::new(compressor::SharedRegistry::new());
 
     for entry in WalkDir::new(root_path) {
         let entry = entry?;
@@ -43,9 +45,15 @@ pub fn create_archive(
             let start_pos = out_file.stream_position()?;
 
             // We need to clone the file handle because compress_file sends it to a thread,
-            // requiring 'static lifetime or ownership. A simple reference won't work.
             let out_file_clone = out_file.try_clone()?;
-            compressor::compress_file(file_path, out_file_clone, num_threads, false, false)?;
+            compressor::compress_file(
+                file_path,
+                out_file_clone,
+                num_threads,
+                false,
+                false,
+                Arc::clone(&global_registry),
+            )?;
 
             let end_pos = out_file.stream_position()?;
 
@@ -94,6 +102,8 @@ pub fn extract_archive(input_path: &str, output_root: &str) -> std::io::Result<(
             "Invalid Archive Header",
         ));
     }
+
+    let mut global_template_store: Vec<String> = Vec::new();
 
     loop {
         // 1. Read Path Length
@@ -153,7 +163,11 @@ pub fn extract_archive(input_path: &str, output_root: &str) -> std::io::Result<(
 
         let mut out_file = File::create(&target_path)?;
         // We need `decompress_stream`!
-        decompressor::LogDecompressor::decompress_to_writer(&mut handle, &mut out_file)?;
+        decompressor::LogDecompressor::decompress_to_writer(
+            &mut handle,
+            &mut out_file,
+            &mut global_template_store,
+        )?;
 
         // Recover original file handle
         in_file = handle.into_inner();

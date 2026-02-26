@@ -25,6 +25,7 @@ pub struct LogAccumulator {
 
 impl LogAccumulator {
     pub fn new(registry: Arc<SharedRegistry>) -> Self {
+        let initial_count = registry.template_store.read().unwrap().len();
         LogAccumulator {
             ts_col: Vec::new(),
             lvl_col: Vec::new(),
@@ -33,7 +34,7 @@ impl LogAccumulator {
             nl_col: Vec::new(),
             max_lines_per_chunk: 200_000,
             current_line_count: 0,
-            last_template_count: 0,
+            last_template_count: initial_count,
             chunk_counter: 0,
             registry,
         }
@@ -72,6 +73,14 @@ impl LogAccumulator {
             .iter()
             .map(|(_, tmpl)| tmpl.clone())
             .collect();
+
+        println!(
+            "  Accumulator take_chunk {}: last={}, current={}, delta={}",
+            self.chunk_counter,
+            self.last_template_count,
+            current_store.len(),
+            registry_delta.len()
+        );
 
         self.last_template_count = current_store.len();
         drop(current_store); // Release lock ASAP
@@ -151,17 +160,6 @@ impl SharedRegistry {
 
         (new_id, template_str, vars)
     }
-
-    pub fn dump(&self) -> Vec<(u32, u64, String)> {
-        let store = self.template_store.read().unwrap();
-
-        // Store has (Hash, Template) at index ID
-        let mut result = Vec::with_capacity(store.len());
-        for (id, (hash, tmpl)) in store.iter().enumerate() {
-            result.push((id as u32, *hash, tmpl.clone()));
-        }
-        result
-    }
 }
 
 // 2. Compression Logic (Stateless - Parallel)
@@ -237,183 +235,6 @@ pub fn compress_chunk(raw: RawChunk) -> std::io::Result<CompressedChunk> {
     })
 }
 
-// 3. Writer (Single Threaded - Serial)
-pub struct ChunkWriter {
-    writer: std::io::BufWriter<File>,
-    buffer: Vec<u8>,
-    buffer_limit: usize,
-}
-
-impl ChunkWriter {
-    pub fn new(filepath: &str) -> std::io::Result<Self> {
-        let file = File::create(filepath)?;
-        let mut writer = std::io::BufWriter::new(file);
-        writer.write_all(b"STZ1")?;
-        Ok(ChunkWriter {
-            writer,
-            buffer: Vec::with_capacity(20 * 1024 * 1024), // Pre-alloc 20MB
-            buffer_limit: 20 * 1024 * 1024,
-        })
-    }
-
-    pub fn write_chunk(&mut self, chunk: CompressedChunk) -> std::io::Result<()> {
-        // Calculate total size of this chunk payload
-        let chunk_size = 4
-            + chunk.registry_blob.len()
-            + 4
-            + chunk.ts_blob.len()
-            + 4
-            + chunk.lvl_blob.len()
-            + 4
-            + chunk.id_blob.len()
-            + 4
-            + chunk.var_blob.len()
-            + 4
-            + chunk.nl_blob.len();
-
-        // Flush if buffer would overflow
-        if self.buffer.len() + chunk_size > self.buffer_limit {
-            self.writer.write_all(&self.buffer)?;
-            self.buffer.clear();
-        }
-
-        // Write to Memory Buffer
-        // 1. Registry
-        self.buffer
-            .extend_from_slice(&u32::to_le_bytes(chunk.registry_blob.len() as u32));
-        self.buffer.extend_from_slice(&chunk.registry_blob);
-
-        // 2. Timestamps
-        self.buffer
-            .extend_from_slice(&u32::to_le_bytes(chunk.ts_blob.len() as u32));
-        self.buffer.extend_from_slice(&chunk.ts_blob);
-
-        // 3. Levels
-        self.buffer
-            .extend_from_slice(&u32::to_le_bytes(chunk.lvl_blob.len() as u32));
-        self.buffer.extend_from_slice(&chunk.lvl_blob);
-
-        // 4. IDs
-        self.buffer
-            .extend_from_slice(&u32::to_le_bytes(chunk.id_blob.len() as u32));
-        self.buffer.extend_from_slice(&chunk.id_blob);
-
-        // 5. Variables
-        self.buffer
-            .extend_from_slice(&u32::to_le_bytes(chunk.var_blob.len() as u32));
-        self.buffer.extend_from_slice(&chunk.var_blob);
-
-        // 6. Newlines
-        self.buffer
-            .extend_from_slice(&u32::to_le_bytes(chunk.nl_blob.len() as u32));
-        self.buffer.extend_from_slice(&chunk.nl_blob);
-
-        Ok(())
-    }
-
-    pub fn finish(&mut self) -> std::io::Result<()> {
-        if !self.buffer.is_empty() {
-            self.writer.write_all(&self.buffer)?;
-            self.buffer.clear();
-        }
-        self.writer.flush()?;
-        Ok(())
-    }
-}
-
-pub struct DebugChunkWriter {
-    writer: std::io::BufWriter<File>,
-    registry_ref: Arc<SharedRegistry>,
-}
-
-impl DebugChunkWriter {
-    pub fn new(filepath: &str, registry_ref: Arc<SharedRegistry>) -> std::io::Result<Self> {
-        let file = File::create(filepath)?;
-        let writer = std::io::BufWriter::new(file);
-        Ok(DebugChunkWriter {
-            writer,
-            registry_ref,
-        })
-    }
-
-    pub fn write_chunk(&mut self, chunk: RawChunk) -> std::io::Result<()> {
-        writeln!(self.writer, "=== CHUNK {} ===", chunk.chunk_id)?;
-        writeln!(self.writer, "Rows: {}", chunk.ts_col.len())?;
-
-        writeln!(
-            self.writer,
-            "TS_COL (First 10): {:?}",
-            chunk.ts_col.iter().take(10).collect::<Vec<_>>()
-        )?;
-        writeln!(
-            self.writer,
-            "LVL_COL (First 10): {:?}",
-            chunk.lvl_col.iter().take(10).collect::<Vec<_>>()
-        )?;
-        writeln!(
-            self.writer,
-            "ID_COL (First 10): {:?}",
-            chunk.id_col.iter().take(10).collect::<Vec<_>>()
-        )?;
-        writeln!(
-            self.writer,
-            "VAR_COL (First 10): {:?}",
-            chunk.var_col.iter().take(10).collect::<Vec<_>>()
-        )?;
-
-        writeln!(self.writer, "================\n")?;
-        Ok(())
-    }
-    pub fn finish(&mut self) -> std::io::Result<()> {
-        writeln!(self.writer, "=== REGISTRY DUMP ===")?;
-        let snapshot = self.registry_ref.dump();
-        for (id, hash, tmpl) in snapshot {
-            writeln!(self.writer, "{}: [{:016x}] \"{}\"", id, hash, tmpl)?;
-        }
-        self.writer.flush()?;
-        Ok(())
-    }
-}
-
-pub struct BenchmarkWriter {
-    writer: std::io::BufWriter<File>,
-    registry_ref: Arc<SharedRegistry>,
-    total_rows: usize,
-}
-
-impl BenchmarkWriter {
-    pub fn new(filepath: &str, registry_ref: Arc<SharedRegistry>) -> std::io::Result<Self> {
-        let file = File::create(filepath)?;
-        let writer = std::io::BufWriter::new(file);
-        Ok(BenchmarkWriter {
-            writer,
-            registry_ref,
-            total_rows: 0,
-        })
-    }
-
-    pub fn write_chunk(&mut self, chunk: RawChunk) -> std::io::Result<()> {
-        self.total_rows += chunk.ts_col.len();
-        Ok(())
-    }
-
-    pub fn finish(&mut self) -> std::io::Result<()> {
-        writeln!(
-            self.writer,
-            "Benchmark Complete. Processed {} rows.",
-            self.total_rows
-        )?;
-        writeln!(self.writer, "=== REGISTRY DUMP ===")?;
-        let snapshot = self.registry_ref.dump();
-
-        for (id, hash, tmpl) in snapshot {
-            writeln!(self.writer, "{}: [{:016x}] \"{}\"", id, hash, tmpl)?;
-        }
-        self.writer.flush()?;
-        Ok(())
-    }
-}
-
 // Helper function to robustly parse timestamp to millis
 fn parse_timestamp_millis(raw_ts: &str) -> u64 {
     // 1. Normalize comma to dot
@@ -455,10 +276,11 @@ use std::thread;
 /// This is a self-contained pipeline including reading, parsing, and compressing.
 pub fn compress_file<W: Write + Send + 'static>(
     input_path: &Path,
-    mut writer: W,
+    writer: W,
     num_threads: usize,
     debug_mode: bool,
     benchmark_mode: bool,
+    registry: Arc<SharedRegistry>,
 ) -> std::io::Result<()> {
     // 1. Setup Channels
     // Parse Pipeline: Job -> Result (PreDigestedEntry)
@@ -477,9 +299,6 @@ pub fn compress_file<W: Write + Send + 'static>(
     // Only need comp_chunk channels if NOT debug/benchmark mode
     let (comp_chunk_tx, comp_chunk_rx): (Sender<CompressedChunk>, Receiver<CompressedChunk>) =
         bounded(50);
-
-    // Universal Shared Registry (New for each file)
-    let registry = Arc::new(SharedRegistry::new());
 
     // 2. Spawn Parse Workers
     let parse_threads = num_threads;
@@ -604,8 +423,6 @@ pub fn compress_file<W: Write + Send + 'static>(
 
     if debug_mode {
         // Debug mode Logic
-        let registry_clone3 = registry.clone();
-
         // DebugChunkWriter expects File path. Refactoring it to take writer is annoying.
         // For now, let's just panic or error if debug mode is used with Archive (since we pass a writer).
         // Actually, for single file CLI usage, we pass a file path usually.
@@ -763,6 +580,15 @@ pub fn compress_file<W: Write + Send + 'static>(
 }
 
 fn write_chunk_internal<W: Write>(writer: &mut W, chunk: CompressedChunk) -> std::io::Result<()> {
+    println!(
+        "write_chunk_internal size: reg={}, ts={}, lvl={}, id={}, var={}, nl={}",
+        chunk.registry_blob.len(),
+        chunk.ts_blob.len(),
+        chunk.lvl_blob.len(),
+        chunk.id_blob.len(),
+        chunk.var_blob.len(),
+        chunk.nl_blob.len()
+    );
     // 1. Registry
     writer.write_all(&u32::to_le_bytes(chunk.registry_blob.len() as u32))?;
     writer.write_all(&chunk.registry_blob)?;

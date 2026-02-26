@@ -5,19 +5,12 @@ mod drain_registry;
 mod models;
 mod parser;
 
-use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::io::BufRead;
-use std::io::BufReader;
-use std::sync::Arc;
-use std::thread;
 
-use compressor::{ChunkWriter, LogAccumulator, SharedRegistry, compress_chunk};
-use crossbeam_channel::{Receiver, Sender, bounded};
+use compressor::SharedRegistry;
 use decompressor::LogDecompressor;
-use models::{CompressedChunk, PreDigestedEntry, RawChunk};
-use parser::parse_line;
+use std::sync::Arc;
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -82,7 +75,15 @@ fn main() -> std::io::Result<()> {
                 // Standard file compression
                 let output_file = File::create(output_path)?;
                 let writer = std::io::BufWriter::new(output_file);
-                compressor::compress_file(path, writer, num_threads, debug_mode, benchmark_mode)?;
+                let registry = Arc::new(SharedRegistry::new());
+                compressor::compress_file(
+                    path,
+                    writer,
+                    num_threads,
+                    debug_mode,
+                    benchmark_mode,
+                    registry,
+                )?;
             }
         }
         "decompress" => {

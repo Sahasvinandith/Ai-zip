@@ -48,7 +48,7 @@ for file in "${files[@]}"; do
     # 4. Integrity Check
     echo ">> [Verifying Integrity]"
     # git diff returns 0 if files are identical, 1 if different
-    if git diff --no-index --quiet "$input_file" "$decompressed_file"; then
+    if diff "$input_file" "$decompressed_file"; then
         echo ">> [Result]: PASS (Files verify)"
     else
         echo "!! [Result]: FAIL (Content mismatch)"
