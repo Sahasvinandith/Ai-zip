@@ -6,3 +6,4 @@ Cargo.lock
 Big_logs
 checks
 *.stz
+*.zip
