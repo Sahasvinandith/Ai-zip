@@ -29,12 +29,12 @@ for file in "${files[@]}"; do
     # 1. Compress
     # Outputting time to stderr as per standard `time` behavior
     echo ">> [Compressing]"
-    time cargo run -- compress "$input_file" "$compressed_file" --threads 6
+    time cargo run --release -- compress "$input_file" "$compressed_file" --threads 6
     
     # 2. Check Size
     if [ -f "$compressed_file" ]; then
         # du -h provides human-readable size (e.g., 4.0K, 12M)
-        size=$(du -h "$compressed_file" | cut -f1)
+        size=$(du -h --si "$compressed_file" | cut -f1)
         echo ">> [Artifact Size]: $size"
     else
         echo "!! Error: Compressed file not generated."
@@ -43,7 +43,7 @@ for file in "${files[@]}"; do
 
     # 3. Decompress
     echo ">> [Decompressing]"
-    time cargo run -- decompress "$compressed_file" "$decompressed_file"
+    time cargo run --release -- decompress "$compressed_file" "$decompressed_file"
 
     # 4. Integrity Check
     echo ">> [Verifying Integrity]"
