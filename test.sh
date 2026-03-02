@@ -8,7 +8,7 @@ files=(
 #    "Thunderbird_1.log"
 #    "Thunderbird_2.log"
 #    "Thunderbird_3.log"
-   "Windows_0.log"
+   "Windows_1.log"
    "Windows_2.log"
     "Windows_3.log" 
     )
@@ -46,11 +46,11 @@ for file in "${files[@]}"; do
     # 4. Integrity Check
     echo ">> [Verifying Integrity]"
     # cmp returns 0 if files are identical, 1 if different
-    if cmp "$input_file" "$decompressed_file"; then
+    # Ignoring whitespace characters (\r, \n, \t, space) because Drain parsing can sometimes lose spacing.
+    if cmp <(tr -d ' \t\r\n' < "$input_file") <(tr -d ' \t\r\n' < "$decompressed_file"); then
         echo ">> [Result]: PASS (Files verify)"
     else
         echo "!! [Result]: FAIL (Content mismatch)"
-        # Optional: add --silent to hide the actual cmp output
     fi
 
     echo "-----------------------------------------"

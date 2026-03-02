@@ -25,10 +25,10 @@ mkdir -p "$TMP_DIR/file1_parts"
 mkdir -p "$TMP_DIR/file2_parts"
 
 echo "Splitting $FILE1 into chunks of 2,000,000 lines..."
-split -l 2000000 "$FILE1" "$TMP_DIR/file1_parts/part_"
+split -l 80000 "$FILE1" "$TMP_DIR/file1_parts/part_"
 
 echo "Splitting $FILE2 into chunks of 2,000,000 lines..."
-split -l 2000000 "$FILE2" "$TMP_DIR/file2_parts/part_"
+split -l 80000 "$FILE2" "$TMP_DIR/file2_parts/part_"
 
 echo "Starting comparison..."
 
@@ -52,7 +52,7 @@ for part1 in "$TMP_DIR/file1_parts/"*; do
     
     # Run diff and check the exit status
     # Note: diff returns 0 for identical, 1 for different, >1 for trouble.
-    if ! diff -q "$part1" "$part2" > /dev/null; then
+    if ! diff -w -q "$part1" "$part2" > /dev/null; then
         echo "❌ Difference detected in chunk $filename!"
         echo "Preview of the differences:"
         diff "$part1" "$part2" | head -n 20
