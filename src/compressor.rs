@@ -74,14 +74,6 @@ impl LogAccumulator {
             .map(|(_, tmpl)| tmpl.clone())
             .collect();
 
-        println!(
-            "  Accumulator take_chunk {}: last={}, current={}, delta={}",
-            self.chunk_counter,
-            self.last_template_count,
-            current_store.len(),
-            registry_delta.len()
-        );
-
         self.last_template_count = current_store.len();
         drop(current_store); // Release lock ASAP
 
@@ -527,11 +519,22 @@ pub fn compress_file<W: Write + Send + 'static>(
     // 5. Reader (Main Thread)
     // We need to read the input path.
     let input_file = File::open(input_path)?;
+
+    // Set up progress bar
+    let file_size = input_file.metadata().map(|m| m.len()).unwrap_or(0);
+    let pb = indicatif::ProgressBar::new(file_size);
+    pb.set_style(indicatif::ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .unwrap()
+        .progress_chars("#>-"));
+
     let mut reader = BufReader::new(input_file);
     let mut line_buffer = Vec::new();
     let mut seq_counter = 0;
 
     while reader.read_until(b'\n', &mut line_buffer)? > 0 {
+        pb.inc(line_buffer.len() as u64);
+
         let mut line_string = String::with_capacity(line_buffer.len());
         for chunk in line_buffer.utf8_chunks() {
             line_string.push_str(chunk.valid());
@@ -559,6 +562,7 @@ pub fn compress_file<W: Write + Send + 'static>(
 
         line_buffer.clear();
     }
+    pb.finish_with_message("Reading complete");
     drop(job_tx); // Close job_tx to signal parse workers to finish
 
     // Wait for all threads
@@ -580,15 +584,6 @@ pub fn compress_file<W: Write + Send + 'static>(
 }
 
 fn write_chunk_internal<W: Write>(writer: &mut W, chunk: CompressedChunk) -> std::io::Result<()> {
-    println!(
-        "write_chunk_internal size: reg={}, ts={}, lvl={}, id={}, var={}, nl={}",
-        chunk.registry_blob.len(),
-        chunk.ts_blob.len(),
-        chunk.lvl_blob.len(),
-        chunk.id_blob.len(),
-        chunk.var_blob.len(),
-        chunk.nl_blob.len()
-    );
     // 1. Registry
     writer.write_all(&u32::to_le_bytes(chunk.registry_blob.len() as u32))?;
     writer.write_all(&chunk.registry_blob)?;

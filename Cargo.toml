@@ -14,3 +14,4 @@ zstd = "0.13.3"
 clap = { version = "4.4", features = ["derive"] }
 drain-rs = { git = "https://github.com/benwtrent/drain-rs" }
 walkdir = "2.5.0"
+indicatif = "0.18.4"
