@@ -5,21 +5,15 @@ mkdir -p ./checks
 
 # List of files to process
 files=(
-    "hadoop-hdfs-datanode-mesos-32.log"
-    "hadoop-hdfs-secondarynamenode-mesos-01.log"
-    "hadoop-hdfs-datanode-mesos-31.log"
-    "hadoop-hdfs-datanode-mesos-17.log"
-    "hadoop-hdfs-datanode-mesos-01.log"
-    "new_file_1.log"
-    "new_file_2.log"
-    "hadoop-hdfs-namenode-mesos-01.log"
+    "Thunderbird.log",
+    "Windows.log"
 )
 
 echo "Starting Compression & Integrity Tests..."
 echo "========================================="
 
 for file in "${files[@]}"; do
-    input_file="./Big_logs/$file"
+    input_file="./win_thunderbird_logs/$file"
     # Using dynamic naming for artifacts to avoid collisions
     compressed_file="./checks/${file}.stz"
     decompressed_file="./checks/${file}.decompressed.log"
@@ -47,12 +41,11 @@ for file in "${files[@]}"; do
 
     # 4. Integrity Check
     echo ">> [Verifying Integrity]"
-    # cmp returns 0 if files are identical, 1 if different
-    if cmp "$input_file" "$decompressed_file"; then
-        echo ">> [Result]: PASS (Files verify)"
+    # git diff returns 0 if files are identical, 1 if different
+    if cmp -s "$input_file" "$decompressed_file"; then
+        echo "   [OK] $input_file"
     else
-        echo "!! [Result]: FAIL (Content mismatch)"
-        # Optional: add --silent to hide the actual cmp output
+        echo "!! [FAIL] Mismatch detected in: $input_file"    
     fi
 
     echo "-----------------------------------------"
