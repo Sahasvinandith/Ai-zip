@@ -7,3 +7,5 @@ Big_logs
 checks
 *.stz
 *.zip
+*xz
+/split_compare_tmp

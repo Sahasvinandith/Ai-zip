@@ -5,21 +5,19 @@ mkdir -p ./checks
 
 # List of files to process
 files=(
-    "hadoop-hdfs-datanode-mesos-32.log"
-    "hadoop-hdfs-secondarynamenode-mesos-01.log"
-    "hadoop-hdfs-datanode-mesos-31.log"
-    "hadoop-hdfs-datanode-mesos-17.log"
-    "hadoop-hdfs-datanode-mesos-01.log"
-    "new_file_1.log"
-    "new_file_2.log"
-    "hadoop-hdfs-namenode-mesos-01.log"
-)
+#    "Thunderbird_1.log"
+#    "Thunderbird_2.log"
+#    "Thunderbird_3.log"
+   "Windows_0.log"
+   "Windows_2.log"
+    "Windows_3.log" 
+    )
 
 echo "Starting Compression & Integrity Tests..."
 echo "========================================="
 
 for file in "${files[@]}"; do
-    input_file="./Big_logs/$file"
+    input_file="./win_thunderbird_logs/$file"
     # Using dynamic naming for artifacts to avoid collisions
     compressed_file="./checks/${file}.stz"
     decompressed_file="./checks/${file}.decompressed.log"
