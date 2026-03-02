@@ -15,6 +15,15 @@ impl LogDecompressor {
         // 1. Magic Bytes check
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic)?;
+
+        let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let pb = indicatif::ProgressBar::new(file_size);
+        pb.set_style(indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+            .unwrap()
+            .progress_chars("#>-"));
+        pb.inc(4);
+
         if &magic != b"STZ1" {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -23,13 +32,17 @@ impl LogDecompressor {
         }
 
         let mut template_store: Vec<String> = Vec::new();
-        Self::decompress_to_writer(&mut file, &mut writer, &mut template_store)
+        let res =
+            Self::decompress_to_writer(&mut file, &mut writer, &mut template_store, Some(&pb));
+        pb.finish_with_message("Decompression complete");
+        res
     }
 
     pub fn decompress_to_writer<R: Read, W: Write>(
         reader: &mut R,
         writer: &mut W,
         template_store: &mut Vec<String>,
+        pb: Option<&indicatif::ProgressBar>,
     ) -> std::io::Result<()> {
         // Loop until EOF
         loop {
@@ -45,6 +58,9 @@ impl LogDecompressor {
             if size_read == 0 {
                 break; // EOF
             }
+            if let Some(p) = pb {
+                p.inc(size_read as u64);
+            }
             if size_read < 4 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -55,6 +71,9 @@ impl LogDecompressor {
             let size = u32::from_le_bytes(size_buf) as usize;
             let mut compressed_data = vec![0u8; size];
             reader.read_exact(&mut compressed_data)?;
+            if let Some(p) = pb {
+                p.inc(size as u64);
+            }
             let decoded = zstd::decode_all(&compressed_data[..])?;
 
             // Block 1: Registry Delta (Decoded above)
@@ -67,9 +86,15 @@ impl LogDecompressor {
             let read_next_block = |r: &mut R| -> std::io::Result<Vec<u8>> {
                 let mut sz_buf = [0u8; 4];
                 r.read_exact(&mut sz_buf)?;
+                if let Some(p) = pb {
+                    p.inc(4);
+                }
                 let sz = u32::from_le_bytes(sz_buf) as usize;
                 let mut data = vec![0u8; sz];
                 r.read_exact(&mut data)?;
+                if let Some(p) = pb {
+                    p.inc(sz as u64);
+                }
                 let dec = zstd::decode_all(&data[..])?;
                 Ok(dec)
             };

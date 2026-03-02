@@ -167,6 +167,7 @@ pub fn extract_archive(input_path: &str, output_root: &str) -> std::io::Result<(
             &mut handle,
             &mut out_file,
             &mut global_template_store,
+            None,
         )?;
 
         // Recover original file handle
