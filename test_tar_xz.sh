@@ -32,7 +32,7 @@ echo "Processing Directory: $PARENT_DIR"
 
 # 1. Compress
 echo ">> [Compressing with tar_xz]"
-time tar -cJf "$compressed_file" "$PARENT_DIR"
+/usr/bin/time -f "Time: %E, CPU: %P, Max Memory: %M KB" tar -cJf "$compressed_file" "$PARENT_DIR"
 
 # 2. Check Size
 if [ -f "$compressed_file" ]; then
@@ -48,7 +48,7 @@ fi
 echo ">> [Decompressing tar_xz]"
 mkdir -p "$decompressed_dir"
 # Extract into the dedicated decompression directory to avoid overwriting originals
-time tar -xf "$compressed_file" -C "$decompressed_dir"
+/usr/bin/time -f "Time: %E, CPU: %P, Max Memory: %M KB" tar -xf "$compressed_file" -C "$decompressed_dir"
 
 echo "-----------------------------------------"
 echo "Benchmark complete! Artifacts are stored in $OUT_DIR/"

@@ -13,7 +13,7 @@ rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
 echo ">> [Compressing Directory: $INPUT_DIR with zip]"
-time zip -r -q "$ARCHIVE_FILE" "$INPUT_DIR"
+/usr/bin/time -f "Time: %E, CPU: %P, Max Memory: %M KB" zip -r -q "$ARCHIVE_FILE" "$INPUT_DIR"
 
 # 2. Check Size
 if [ -f "$ARCHIVE_FILE" ]; then
@@ -28,7 +28,7 @@ echo "---------------------------------------------------"
 
 # 3. Decompress
 echo ">> [Decompressing Archive: $ARCHIVE_FILE to $OUTPUT_DIR with unzip]"
-time unzip -q "$ARCHIVE_FILE" -d "$OUTPUT_DIR"
+/usr/bin/time -f "Time: %E, CPU: %P, Max Memory: %M KB" unzip -q "$ARCHIVE_FILE" -d "$OUTPUT_DIR"
 
 echo "---------------------------------------------------"
 

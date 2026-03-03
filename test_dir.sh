@@ -13,7 +13,7 @@ rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
 echo ">> [Compressing Directory: $INPUT_DIR]"
-time cargo run --release -- compress "$INPUT_DIR" "$ARCHIVE_FILE" --threads 8
+/usr/bin/time -f "Time: %E, CPU: %P, Max Memory: %M KB" cargo run --release -- compress "$INPUT_DIR" "$ARCHIVE_FILE" --threads 8
 
 # 2. Check Size
 if [ -f "$ARCHIVE_FILE" ]; then
@@ -28,7 +28,7 @@ echo "---------------------------------------------------"
 
 # 3. Decompress
 echo ">> [Decompressing Archive: $ARCHIVE_FILE to $OUTPUT_DIR]"
-time cargo run --release -- decompress "$ARCHIVE_FILE" "$OUTPUT_DIR"
+/usr/bin/time -f "Time: %E, CPU: %P, Max Memory: %M KB" cargo run --release -- decompress "$ARCHIVE_FILE" "$OUTPUT_DIR"
 
 echo "---------------------------------------------------"
 
