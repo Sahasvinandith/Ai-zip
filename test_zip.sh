@@ -1,41 +1,48 @@
 #!/bin/bash
 
-# Create the output directory if it doesn't exist
-mkdir -p ./checks_zip
+if [ -z "$1" ]; then
+    echo "Usage: $0 <parent_directory>"
+    echo "Example: $0 ./Big_logs"
+    exit 1
+fi
 
-# List of files to process
-files=(
-    "new_file_2.log"
-    "hadoop-hdfs-namenode-mesos-01.log"
-)
+PARENT_DIR="$1"
 
-echo "Starting Compression & Integrity Tests with ZIP..."
-echo "================================================="
+if [ ! -d "$PARENT_DIR" ]; then
+    echo "Error: Directory '$PARENT_DIR' does not exist."
+    exit 1
+fi
 
-for file in "${files[@]}"; do
-    input_file="./Big_logs/$file"
-    # Using dynamic naming for artifacts to avoid collisions
-    compressed_file="./checks_zip/${file}.zip"
-    decompressed_file="./checks_zip/${file}.decompressed.log"
+# Directory to store compressed files and decompression outputs
+OUT_DIR="./zip_checks"
+mkdir -p "$OUT_DIR"
 
-    echo "Processing: $file"
+echo "Starting ZIP Compression & Decompression Benchmarks..."
+echo "Folder: $PARENT_DIR"
+echo "========================================="
 
-    if [ ! -f "$input_file" ]; then
-        echo "!! Error: Input file $input_file not found."
-        continue
-    fi
+# Find all log files in the specified directory
+# (Customize the -name "*.log" filter if your files have a different extension)
+for input_file in "$PARENT_DIR"/*.log; do
+    # Skip if no .log files were found (glob didn't expand)
+    [ -e "$input_file" ] || continue
+
+    filename=$(basename "$input_file")
+    compressed_file="$OUT_DIR/${filename}.zip"
+    decompressed_file="$OUT_DIR/${filename}_extracted.log"
+
+    echo "Processing: $filename"
 
     # 1. Compress
     echo ">> [Compressing with zip]"
-    # Remove existing zip if any to avoid appending
-    rm -f "$compressed_file"
-    # -q for quiet, -j for junk paths (don't preserve directory structure)
+    # Using the exact format requested, but placing the output in OUT_DIR
     time zip -q -j "$compressed_file" "$input_file"
     
     # 2. Check Size
     if [ -f "$compressed_file" ]; then
+        # Use du -h (--si) to get human-readable size
         size=$(du -h --si "$compressed_file" | cut -f1)
-        echo ">> [Artifact Size]: $size"
+        echo ">> [Compressed Size]: $size"
     else
         echo "!! Error: Compressed file not generated."
         continue
@@ -43,16 +50,10 @@ for file in "${files[@]}"; do
 
     # 3. Decompress
     echo ">> [Decompressing with unzip]"
-    # -p extracts file to stdout, which we redirect
+    # Extract file to stdout and redirect to a decompressed file
     time unzip -p "$compressed_file" > "$decompressed_file"
-
-    # 4. Integrity Check
-    echo ">> [Verifying Integrity]"
-    if diff -q "$input_file" "$decompressed_file" >/dev/null; then
-        echo ">> [Result]: PASS (Files verify)"
-    else
-        echo "!! [Result]: FAIL (Content mismatch)"
-    fi
 
     echo "-----------------------------------------"
 done
+
+echo "Benchmark complete! Artifacts are stored in $OUT_DIR/"

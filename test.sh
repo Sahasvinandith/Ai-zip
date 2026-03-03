@@ -8,9 +8,9 @@ files=(
 #    "Thunderbird_1.log"
 #    "Thunderbird_2.log"
 #    "Thunderbird_3.log"
-   "Windows_1.log"
-   "Windows_2.log"
-    "Windows_3.log" 
+   "Windows.log"
+#    "Windows_2.log"
+#     "Windows_3.log" 
     )
 
 echo "Starting Compression & Integrity Tests..."

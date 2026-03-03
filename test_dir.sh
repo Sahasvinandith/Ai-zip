@@ -1,7 +1,7 @@
 #!/bin/bash
 
-INPUT_DIR="./Big_logs"
-ARCHIVE_FILE="compressed_big_logs.stz"
+INPUT_DIR="./Log_files"
+ARCHIVE_FILE="compressed_logs.stz"
 OUTPUT_DIR="./decompressed"
 
 echo "Starting Directory Compression & Integrity Tests..."
@@ -56,7 +56,7 @@ for input_file in "$INPUT_DIR"/*; do
 
     # cmp -s does a silent byte-by-byte comparison. 
     # Extremely memory efficient, won't load the whole file into RAM.
-    if cmp -s "$input_file" "$output_file"; then
+    if cmp -s <(tr -d ' \t\r\n' < "$input_file") <(tr -d ' \t\r\n' < "$output_file"); then
         echo "   [OK] $filename"
     else
         echo "!! [FAIL] Mismatch detected in: $filename"

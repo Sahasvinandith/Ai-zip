@@ -1,7 +1,7 @@
 #!/bin/bash
 
-INPUT_DIR="./Big_logs"
-ARCHIVE_FILE="compressed_big_logs.zip"
+INPUT_DIR="./Log_files"
+ARCHIVE_FILE="compressed_logs.zip"
 OUTPUT_DIR="./decompressed_zip"
 
 echo "Starting Directory Compression & Integrity Tests with ZIP..."
